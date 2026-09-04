@@ -126,7 +126,7 @@ ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
-APP_BUILD_VERSION = "2026-09-04-v15-label-update"
+APP_BUILD_VERSION = "2026-09-04-v16-included-checkbox-baseline"
 HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 CONNECTION_BUILD = "WORKING_V3_FALLBACK_CONNECTION"
 # CONNECTION LOCK: copied unchanged from the v3/v7 build that successfully connected.
@@ -2340,12 +2340,13 @@ def _render_leaf_checkbox_grid(items: Sequence[Tuple[str, str]], columns: int = 
 
 
 def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> Optional[TargetSpec]:
-    """Hierarchical checkbox selector for arbitrary multi-removal combinations.
+    """Hierarchical checkbox selector for arbitrary keep/remove combinations.
 
-    There is intentionally no dropdown/multiselect here. Bulk type/group checkboxes
-    are convenience controls only; the individual activity checkboxes are the source
-    of truth. That means a user can select a parent and then deselect any children,
-    supporting every practical permutation/combination of activities.
+    In multi-scenario mode a checked leaf means the activity is INCLUDED/KEPT.
+    An unchecked leaf means it is REMOVED from the simulated scenario. All leaves
+    start checked, so the default state is the real/current scenario. Bulk
+    type/group checkboxes are only convenience setters; individual activity
+    checkboxes remain the source of truth.
     """
     pre = filter_valid_prepayment_events(attendance)
     pre = pre[pre["program"].eq(program)].copy() if pre is not None and not pre.empty else pre
@@ -2353,10 +2354,11 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
         st.info("No pre-payment core activities found for this program.")
         return None
 
-    st.markdown("#### Select activities to remove together")
+    st.markdown("#### Choose which activities stay in the scenario")
     st.caption(
-        "Tick any activity combination. **Bulk checkboxes only select/clear their children**; "
-        "after using one, you can untick any individual activity to create an exact combination."
+        "**All selected = the current real scenario.** Untick any activity you want to remove, "
+        "then click **Show Analysis**. Bulk checkboxes only include/exclude their children; "
+        "individual activity checkboxes are the final truth."
     )
 
     # Build every atomic leaf first. The simulator uses these leaf states as truth.
@@ -2382,7 +2384,7 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
                 "key": key,
             })
 
-    # Pre-compute bulk keys so global/type bulk toggles can keep the visible controls aligned.
+    # Pre-compute bulk keys so global/type bulk toggles can keep visible controls aligned.
     type_bulk_keys: Dict[str, str] = {
         t: _checkbox_state_key(key_prefix, "bulk_type", t) for t in CORE_TYPES
     }
@@ -2403,8 +2405,8 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
     all_linked_bulk_keys = list(type_bulk_keys.values()) + list(group_bulk_keys.values()) + list(hackathon_bulk_keys.values())
     global_bulk_key = _checkbox_state_key(key_prefix, "bulk_all_core")
 
-    # Multi-remove starts with every available activity selected. Initialize once
-    # for this build/program; after that, user deselections persist normally.
+    # Multi-scenario starts with every available activity INCLUDED. Initialize once
+    # per build/program; after that user deselections persist normally.
     defaults_init_key = f"{key_prefix}_multi_defaults_initialized_{APP_BUILD_VERSION}"
     if not st.session_state.get(defaults_init_key, False):
         for key in all_leaf_keys + all_linked_bulk_keys + [global_bulk_key]:
@@ -2414,12 +2416,29 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
         for key in all_leaf_keys + all_linked_bulk_keys + [global_bulk_key]:
             st.session_state.setdefault(key, True)
 
+    # Keep parent checkbox states aligned with their leaves. This makes it visually
+    # obvious when even one sub-activity has been removed. Parent checkboxes are
+    # still convenience setters; the leaves remain authoritative.
+    for group in ordered_groups:
+        group_keys = [m["key"] for m in leaf_meta if m["activity_type"] == "Online Event" and m["online_group"] == group]
+        if group_keys:
+            st.session_state[group_bulk_keys[group]] = all(bool(st.session_state.get(k, False)) for k in group_keys)
+    for group in ordered_hackathon_groups:
+        group_keys = [m["key"] for m in leaf_meta if m["activity_type"] == "Hackathon" and m.get("hackathon_group", "") == group]
+        if group_keys:
+            st.session_state[hackathon_bulk_keys[group]] = all(bool(st.session_state.get(k, False)) for k in group_keys)
+    for activity_type in CORE_TYPES:
+        type_keys = [m["key"] for m in leaf_meta if m["activity_type"] == activity_type]
+        if type_keys:
+            st.session_state[type_bulk_keys[activity_type]] = all(bool(st.session_state.get(k, False)) for k in type_keys)
+    st.session_state[global_bulk_key] = all(bool(st.session_state.get(k, False)) for k in all_leaf_keys) if all_leaf_keys else True
+
     st.checkbox(
-        "Select / clear ALL core activities",
+        "Include ALL core activities",
         key=global_bulk_key,
         on_change=_apply_bulk_checkbox,
         args=(global_bulk_key, all_leaf_keys, all_linked_bulk_keys),
-        help="Convenience toggle. You can still untick any individual activity afterwards.",
+        help="Checked means included in the scenario. Untick to remove everything, then re-enable any individual activities you want to keep.",
     )
 
     st.markdown("---")
@@ -2431,17 +2450,16 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
             online_leaf_keys = [m["key"] for m in online_items]
             online_group_keys = [group_bulk_keys[g] for g in ordered_groups]
             st.checkbox(
-                "Select / clear all Online Events",
+                "Include all Online Events",
                 key=type_bulk_keys["Online Event"],
                 on_change=_apply_bulk_checkbox,
                 args=(type_bulk_keys["Online Event"], online_leaf_keys, online_group_keys),
             )
-            st.caption("AMA/category checkboxes are bulk selectors. Individual event boxes below are the final selection.")
+            st.caption("AMA/category checkboxes are bulk include/exclude controls. Individual event boxes below are the final scenario selection.")
 
             grouped = {}
             for item in online_items:
                 grouped.setdefault(item["online_group"] or "Other Online Event", []).append(item)
-
             group_order = [g for g in AMA_GROUP_ORDER if g in grouped]
             group_order += sorted(g for g in grouped if g not in set(group_order))
             for group in group_order:
@@ -2449,14 +2467,14 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
                 group_key = group_bulk_keys.setdefault(group, _checkbox_state_key(key_prefix, "bulk_group", group))
                 st.markdown(f"**{group}**")
                 st.checkbox(
-                    f"Select / clear all in {group}",
+                    f"Include all in {group}",
                     key=group_key,
                     on_change=_apply_bulk_checkbox,
                     args=(group_key, [m["key"] for m in items], ()),
                 )
                 _render_leaf_checkbox_grid([(m["event_name"], m["key"]) for m in items], columns=2)
-                selected_in_group = sum(bool(st.session_state.get(m["key"], False)) for m in items)
-                st.caption(f"Selected {selected_in_group} of {len(items)} in {group}")
+                included_in_group = sum(bool(st.session_state.get(m["key"], False)) for m in items)
+                st.caption(f"Included {included_in_group} of {len(items)} in {group}")
                 st.markdown("")
 
     # MASTERCLASS / COMPETITION: type -> individual activity.
@@ -2472,7 +2490,7 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
         with st.expander(f"{display_names[activity_type]} · {len(items)} individual activities", expanded=False):
             leaf_keys = [m["key"] for m in items]
             st.checkbox(
-                f"Select / clear all {display_names[activity_type]}",
+                f"Include all {display_names[activity_type]}",
                 key=type_bulk_keys[activity_type],
                 on_change=_apply_bulk_checkbox,
                 args=(type_bulk_keys[activity_type], leaf_keys, ()),
@@ -2481,8 +2499,8 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
                 [(m["event_name"], m["key"]) for m in sorted(items, key=lambda x: x["event_name"].lower())],
                 columns=2,
             )
-            selected_n = sum(bool(st.session_state.get(m["key"], False)) for m in items)
-            st.caption(f"Selected {selected_n} of {len(items)} {display_names[activity_type].lower()}")
+            included_n = sum(bool(st.session_state.get(m["key"], False)) for m in items)
+            st.caption(f"Included {included_n} of {len(items)} {display_names[activity_type].lower()}")
 
     # HACKATHON: type -> sub-category (including TIF) -> individual activity.
     hackathon_items = [m for m in leaf_meta if m["activity_type"] == "Hackathon"]
@@ -2491,12 +2509,12 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
             hack_leaf_keys = [m["key"] for m in hackathon_items]
             hack_group_keys = [hackathon_bulk_keys[g] for g in ordered_hackathon_groups]
             st.checkbox(
-                "Select / clear all Hackathons",
+                "Include all Hackathons",
                 key=type_bulk_keys["Hackathon"],
                 on_change=_apply_bulk_checkbox,
                 args=(type_bulk_keys["Hackathon"], hack_leaf_keys, hack_group_keys),
             )
-            st.caption("TIF is a Hackathon sub-category. Sub-category checkboxes are bulk selectors; individual activity boxes remain the final selection.")
+            st.caption("TIF is a Hackathon sub-category. Sub-category checkboxes are bulk include/exclude controls; individual activity boxes remain the final scenario selection.")
 
             grouped_hack = {}
             for item in hackathon_items:
@@ -2508,31 +2526,39 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
                 group_key = hackathon_bulk_keys.setdefault(group, _checkbox_state_key(key_prefix, "bulk_hackathon_group", group))
                 st.markdown(f"**{group}**")
                 st.checkbox(
-                    f"Select / clear all in {group}",
+                    f"Include all in {group}",
                     key=group_key,
                     on_change=_apply_bulk_checkbox,
                     args=(group_key, [m["key"] for m in items], ()),
                 )
                 _render_leaf_checkbox_grid([(m["event_name"], m["key"]) for m in items], columns=2)
-                selected_in_group = sum(bool(st.session_state.get(m["key"], False)) for m in items)
-                st.caption(f"Selected {selected_in_group} of {len(items)} in {group}")
+                included_in_group = sum(bool(st.session_state.get(m["key"], False)) for m in items)
+                st.caption(f"Included {included_in_group} of {len(items)} in {group}")
                 st.markdown("")
 
-    selected_leaf_specs: List[TargetSpec] = []
+    # IMPORTANT: checked = kept; unchecked = removed.
+    removed_leaf_specs: List[TargetSpec] = []
+    included_count = 0
     for item in leaf_meta:
-        if not bool(st.session_state.get(item["key"], False)):
+        if bool(st.session_state.get(item["key"], False)):
+            included_count += 1
             continue
-        selected_leaf_specs.append(TargetSpec(item["activity_type"], "event_name", item["event_name"]))
+        removed_leaf_specs.append(TargetSpec(item["activity_type"], "event_name", item["event_name"]))
 
-    selected_leaf_count = len(selected_leaf_specs)
-    if selected_leaf_count == 0:
-        st.info("Tick one or more activity checkboxes, then click **Show Analysis** below.")
-        return None
+    total_count = len(leaf_meta)
+    removed_count = len(removed_leaf_specs)
+    st.markdown(f"**Scenario:** {included_count} included · {removed_count} removed · {total_count} total activities")
 
-    st.success(f"{selected_leaf_count} individual activit{'y' if selected_leaf_count == 1 else 'ies'} selected for removal.")
-    specs = _compress_checkbox_specs(pre, selected_leaf_specs)
+    # All checked means no removal: this is the current real-world baseline.
+    if removed_count == 0:
+        st.success("All activities are included. This is the **current real scenario**; no activity is being removed.")
+        return TargetSpec("Current Scenario", "baseline")
+
+    specs = _compress_checkbox_specs(pre, removed_leaf_specs)
     if not specs:
-        return None
+        return TargetSpec("Current Scenario", "baseline")
+
+    st.warning(f"{removed_count} individual activit{'y' if removed_count == 1 else 'ies'} will be removed when you click **Show Analysis**.")
     if len(specs) == 1:
         return specs[0]
     components = tuple((s.activity_type, s.mode, s.value) for s in specs)
@@ -2551,20 +2577,19 @@ def render_removal_simulator(
     st.caption("Choose an activity type, an AMA category, or one specific event. Every attendance used below is before payment only.")
 
     multi_remove = st.checkbox(
-        "Remove multiple activities together",
+        "Build a multi-activity scenario",
         value=False,
         key=f"{program.lower()}_enable_multi_remove",
-        help="Tick this only when you want to test one combined scenario with multiple activities removed. Leave it unticked to keep the existing single-activity simulator unchanged.",
+        help="In this mode, checked activities stay in the scenario and unchecked activities are removed. All are checked by default, which represents the current real scenario.",
     )
     if multi_remove:
         # Checkbox selections are only a draft until the user explicitly clicks
         # Show Analysis. This prevents every checkbox tick/untick from immediately
-        # recalculating the whole combined-removal scenario.
+        # recalculating the whole scenario.
         candidate_spec = multi_target_selector(attendance, program, key_prefix=program.lower())
         applied_key = f"{program.lower()}_multi_remove_applied_spec"
 
         if candidate_spec is None:
-            # No active selection -> no stale multi-removal analysis should remain.
             st.session_state.pop(applied_key, None)
             st.button(
                 "Show Analysis",
@@ -2580,11 +2605,8 @@ def render_removal_simulator(
             key=f"{program.lower()}_show_multi_remove_analysis",
             type="primary",
             use_container_width=True,
-            help="Run the combined removal analysis using exactly the activities currently ticked above.",
+            help="Analyse the exact scenario above: checked activities are kept and unchecked activities are removed.",
         )
-        # Store a plain immutable signature rather than the dataclass instance.
-        # Streamlit reruns recreate the script class definitions, while tuples remain
-        # stable across reruns and therefore compare reliably.
         candidate_signature = (
             candidate_spec.activity_type,
             candidate_spec.mode,
@@ -2596,15 +2618,48 @@ def render_removal_simulator(
 
         applied_signature = st.session_state.get(applied_key)
         if applied_signature != candidate_signature:
-            st.info("Selections are ready. Click **Show Analysis** to calculate this exact combination.")
+            st.info("Selections are ready. Click **Show Analysis** to calculate this exact scenario.")
             return
 
-        # Use the current-rerun TargetSpec after the saved signature confirms the
-        # user explicitly requested analysis for this exact checkbox combination.
         spec = candidate_spec
     else:
         # Existing single-activity removal flow is intentionally unchanged.
         spec = target_selector(attendance, program, key_prefix=program.lower())
+
+    total_admitted = int(students.loc[students["program"].eq(program), outcome_col].sum())
+    offered_n = int(students["program"].eq(program).sum())
+
+    # In multi-scenario mode, all activities checked means no removal at all.
+    # Show the real/current baseline rather than pretending that every selected
+    # checkbox is a removal target.
+    if spec.mode == "baseline":
+        pre = filter_valid_prepayment_events(attendance)
+        pre = pre[pre["program"].eq(program)].copy() if pre is not None and not pre.empty else pre
+        engaged_n = int(pre["student_id"].nunique()) if pre is not None and not pre.empty else 0
+        outcome_ids = set(
+            students.loc[
+                students["program"].eq(program) & students[outcome_col].fillna(False).astype(bool),
+                "student_id",
+            ]
+        )
+        pre_ids = set(pre["student_id"]) if pre is not None and not pre.empty else set()
+        engaged_then_outcome = len(pre_ids & outcome_ids)
+        current_conversion = pct(total_admitted, offered_n)
+
+        st.markdown("### Current scenario — all activities included")
+        st.caption("No activities are removed. This is the real/current baseline against which removal scenarios are compared.")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Current admitted", f"{total_admitted:,}")
+        c2.metric("Activities removed", "0")
+        c3.metric("Estimated admissions at risk", "0.0")
+        c4.metric("Simulated admitted", f"{total_admitted:,}", "0.0 change")
+        c5.metric("Current conversion", f"{current_conversion:.1f}%")
+
+        b1, b2 = st.columns(2)
+        b1.metric("Engaged Before Payment / Deadline", f"{engaged_n:,}", f"{pct(engaged_n, offered_n):.1f}% of offered")
+        b2.metric(outcome_transition_label(outcome_col), f"{engaged_then_outcome:,}")
+        st.info("Untick one or more activities above and click **Show Analysis** to compare that reduced scenario with this baseline.")
+        return
 
     metrics, features, eligible_idx = evaluate_target(
         students, attendance, occurrences, membership, spec, program, outcome_col,
@@ -2612,16 +2667,17 @@ def render_removal_simulator(
         settings["catalyst_after_count"], settings["reactivation_gap_days"],
     )
 
-    total_admitted = int(students.loc[students["program"].eq(program), outcome_col].sum())
     central = metrics["risk_mid"]
     projected = max(0, total_admitted - central)
 
-    if spec.mode == "multi":
-        st.markdown("### If the selected activities are removed together")
+    if multi_remove and spec.mode == "multi":
+        st.markdown("### If the deselected activities are removed together")
         st.caption(f"Combined removal: {spec.label}")
+    elif multi_remove:
+        st.markdown(f"### If **{spec.label}** is removed from the selected scenario")
     else:
         st.markdown(f"### If **{spec.label}** is removed")
-    offered_n = int(students["program"].eq(program).sum())
+
     projected_conversion = pct(projected, offered_n)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Current admitted", f"{total_admitted:,}")
@@ -2738,7 +2794,6 @@ def render_removal_simulator(
             would require a randomized holdout or a much stronger quasi-experimental design.
             """
         )
-
 
 def render_student_journeys(students: pd.DataFrame, attendance: pd.DataFrame, program: str):
     st.subheader("Student Journey Explorer")
