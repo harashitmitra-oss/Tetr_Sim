@@ -125,7 +125,7 @@ ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
-APP_BUILD_VERSION = "2026-09-04-v10-working-connection-locked"
+APP_BUILD_VERSION = "2026-09-04-v11-multi-remove"
 HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 CONNECTION_BUILD = "WORKING_V3_FALLBACK_CONNECTION"
 # CONNECTION LOCK: copied unchanged from the v3/v7 build that successfully connected.
@@ -1330,19 +1330,40 @@ def build_model(spreadsheet_id: str, tif_path: str, tif_default_date_iso: str):
 @dataclass
 class TargetSpec:
     activity_type: str
-    mode: str = "all"       # all | online_group | event_name
+    mode: str = "all"       # all | online_group | event_name | multi
     value: str = ""
+    # Multi-remove is represented as immutable tuples so the spec remains
+    # deterministic and safe to pass through the existing impact engine.
+    components: Tuple[Tuple[str, str, str], ...] = ()
 
     @property
     def label(self) -> str:
+        if self.mode == "multi":
+            labels = []
+            for activity_type, mode, value in self.components:
+                part = TargetSpec(activity_type, mode, value)
+                labels.append(part.label)
+            return " + ".join(labels) if labels else "Multiple activities"
         if self.mode == "all":
             return f"All {self.activity_type}s" if self.activity_type != "TIF" else "TIF"
         return self.value
 
 
+def selected_activity_types(spec: TargetSpec) -> set:
+    """Return the core activity categories represented by a target spec."""
+    if spec.mode == "multi":
+        return {activity_type for activity_type, _, _ in spec.components}
+    return {spec.activity_type}
+
+
 def target_mask(df: pd.DataFrame, spec: TargetSpec) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=bool)
+    if spec.mode == "multi":
+        combined = pd.Series(False, index=df.index)
+        for activity_type, mode, value in spec.components:
+            combined |= target_mask(df, TargetSpec(activity_type, mode, value))
+        return combined
     m = df["event_category"].astype(str).eq(spec.activity_type)
     if spec.mode == "online_group":
         m &= df["online_group"].astype(str).eq(spec.value)
@@ -1435,7 +1456,10 @@ def build_eligibility_index(
         if pd.isna(ev_date):
             continue
 
-        if spec.activity_type == "TIF":
+        # TIF uses broad offered-student eligibility. This check is event-row
+        # based so it also works when TIF is one component of a multi-remove
+        # scenario.
+        if clean_text(ev.get("event_category", "")) == "TIF":
             candidates = set(sprog["student_id"])
         else:
             candidates = set()
@@ -1595,8 +1619,9 @@ def compute_target_student_features(
             reactivated = False
 
         pre_categories = set(g_pre["event_category"].dropna().astype(str)) if not g_pre.empty else set()
-        only_target_category = bool(pre_categories and pre_categories.issubset({spec.activity_type}))
-        overlap_categories = max(0, len(pre_categories - {spec.activity_type}))
+        selected_types = selected_activity_types(spec)
+        only_target_category = bool(pre_categories and pre_categories.issubset(selected_types))
+        overlap_categories = max(0, len(pre_categories - selected_types))
         replacement_signal = other_within_7 > 0
         engagement_lift = after - before
 
@@ -2090,6 +2115,91 @@ def target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> 
     return TargetSpec(activity_type)
 
 
+def _multi_target_options(attendance: pd.DataFrame, program: str) -> Dict[str, TargetSpec]:
+    """Build selectable removal targets without changing the existing single-target UI.
+
+    The list includes whole activity types, the established AMA categories, and
+    individual events. All options are built from strict pre-payment core
+    attendance, so post-payment-only/non-core activities never appear here.
+    """
+    pre = filter_valid_prepayment_events(attendance)
+    pre = pre[pre["program"].eq(program)].copy() if pre is not None and not pre.empty else pre
+    options: Dict[str, TargetSpec] = {}
+
+    # Whole activity types first.
+    for activity_type in CORE_TYPES:
+        if activity_type == "TIF":
+            if pre is not None and not pre.empty and pre["event_category"].eq("TIF").any():
+                options["TIF — All TIF participation"] = TargetSpec("TIF")
+            continue
+        if pre is not None and not pre.empty and pre["event_category"].eq(activity_type).any():
+            options[f"{activity_type} — All"] = TargetSpec(activity_type)
+
+    if pre is None or pre.empty:
+        return options
+
+    # Established AMA categories, matching the existing dashboard grouping.
+    present_groups = set(
+        x for x in pre.loc[pre["event_category"].eq("Online Event"), "online_group"]
+        .dropna().astype(str).unique() if x
+    )
+    ordered_groups = [g for g in AMA_GROUP_ORDER if g in present_groups]
+    ordered_groups += sorted(g for g in present_groups if g not in set(AMA_GROUP_ORDER))
+    for group in ordered_groups:
+        options[f"Online Event — {group}"] = TargetSpec("Online Event", "online_group", group)
+
+    # Individual events for every core type except TIF, which is one roster-level
+    # activity in the current source.
+    for activity_type in [t for t in CORE_TYPES if t != "TIF"]:
+        names = sorted(
+            x for x in pre.loc[pre["event_category"].eq(activity_type), "event_name"]
+            .dropna().astype(str).unique() if x
+        )
+        for name in names:
+            options[f"{activity_type} — Event — {name}"] = TargetSpec(activity_type, "event_name", name)
+    return options
+
+
+def _collapse_multi_specs(specs: Sequence[TargetSpec]) -> List[TargetSpec]:
+    """Remove redundant selections while preserving the user's intended union."""
+    specs = list(specs)
+    all_types = {s.activity_type for s in specs if s.mode == "all"}
+    out: List[TargetSpec] = []
+    seen = set()
+    for spec in specs:
+        # Selecting an entire type makes its AMA/event children redundant.
+        if spec.activity_type in all_types and spec.mode != "all":
+            continue
+        key = (spec.activity_type, spec.mode, spec.value)
+        if key not in seen:
+            seen.add(key)
+            out.append(spec)
+    return out
+
+
+def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> Optional[TargetSpec]:
+    options = _multi_target_options(attendance, program)
+    labels = list(options.keys())
+    selected_labels = st.multiselect(
+        "Select activities to remove together",
+        labels,
+        default=[],
+        placeholder="Choose two or more activities / categories / events",
+        key=f"{key_prefix}_multi_targets",
+        help="The simulator treats the selected items as one combined removal scenario. Overlapping selections are automatically deduplicated.",
+    )
+    if not selected_labels:
+        st.info("Select activities above to see the combined removal scenario.")
+        return None
+    specs = _collapse_multi_specs([options[label] for label in selected_labels])
+    if not specs:
+        return None
+    if len(specs) == 1:
+        return specs[0]
+    components = tuple((s.activity_type, s.mode, s.value) for s in specs)
+    return TargetSpec("Multiple Activities", "multi", components=components)
+
+
 def render_removal_simulator(
     students: pd.DataFrame,
     attendance: pd.DataFrame,
@@ -2102,7 +2212,19 @@ def render_removal_simulator(
     st.subheader("What if we remove an activity?")
     st.caption("Choose an activity type, an AMA category, or one specific event. Every attendance used below is before payment only.")
 
-    spec = target_selector(attendance, program, key_prefix=program.lower())
+    multi_remove = st.checkbox(
+        "Remove multiple activities together",
+        value=False,
+        key=f"{program.lower()}_enable_multi_remove",
+        help="Tick this only when you want to test one combined scenario with multiple activities removed. Leave it unticked to keep the existing single-activity simulator unchanged.",
+    )
+    if multi_remove:
+        spec = multi_target_selector(attendance, program, key_prefix=program.lower())
+        if spec is None:
+            return
+    else:
+        spec = target_selector(attendance, program, key_prefix=program.lower())
+
     metrics, features, eligible_idx = evaluate_target(
         students, attendance, occurrences, membership, spec, program, outcome_col,
         settings["engagement_window"], settings["deadline_confound_days"],
@@ -2113,7 +2235,11 @@ def render_removal_simulator(
     central = metrics["risk_mid"]
     projected = max(0, total_admitted - central)
 
-    st.markdown(f"### If **{spec.label}** is removed")
+    if spec.mode == "multi":
+        st.markdown("### If the selected activities are removed together")
+        st.caption(f"Combined removal: {spec.label}")
+    else:
+        st.markdown(f"### If **{spec.label}** is removed")
     offered_n = int(students["program"].eq(program).sum())
     projected_conversion = pct(projected, offered_n)
     c1, c2, c3, c4, c5 = st.columns(5)
