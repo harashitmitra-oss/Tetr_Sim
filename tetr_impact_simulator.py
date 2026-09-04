@@ -115,8 +115,6 @@ ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
-APP_BUILD_VERSION = "2026-09-04-v3"
-HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 
 # Visual palette kept close to the existing Tetr dashboard.
 GREEN = "#0b3d2e"
@@ -369,41 +367,10 @@ def nice_layout(fig, height: int = 380):
 # -----------------------------------------------------------------------------
 
 def get_spreadsheet_id() -> str:
-    """Resolve the live New Master Engagement sheet ID.
-
-    This intentionally mirrors the older deployed Tetr dashboard: Streamlit
-    Secrets can override the ID, but the known master sheet ID is also kept as
-    a fallback so the app does not fail when only GOOGLE_SERVICE_ACCOUNT is
-    configured in Secrets.
-    """
     try:
-        # Primary key used by the existing dashboards.
-        value = st.secrets.get("GSHEET_SPREADSHEET_ID", "")
-        if clean_text(value):
-            return clean_text(value)
-
-        # Accept a couple of harmless aliases in case the secret was named
-        # differently in a deployment.
-        for key in ("GOOGLE_SHEET_ID", "SPREADSHEET_ID"):
-            value = st.secrets.get(key, "")
-            if clean_text(value):
-                return clean_text(value)
-
-        # Optional nested layouts.
-        for section in ("GSHEETS", "google_sheets", "sheets"):
-            try:
-                block = st.secrets.get(section, {})
-                if block:
-                    for key in ("spreadsheet_id", "sheet_id", "id"):
-                        value = block.get(key, "")
-                        if clean_text(value):
-                            return clean_text(value)
-            except Exception:
-                pass
+        return clean_text(st.secrets.get("GSHEET_SPREADSHEET_ID", ""))
     except Exception:
-        pass
-
-    return HARDCODED_SHEET_ID
+        return ""
 
 
 def get_service_account_dict() -> Dict:
@@ -2121,22 +2088,10 @@ def render_methodology(data: Dict, tif_path: Optional[Path]):
 
 def main():
     st.title("Tetr Activity Impact Simulator")
-
-    # Build marker makes it obvious on Streamlit Cloud that the newest file is running.
-    st.caption(f"Build: {APP_BUILD_VERSION}")
-
-    # Resolve the spreadsheet ID before any UI/data checks. The previous Tetr
-    # master-sheet ID is a guaranteed fallback, so a separate sheet-ID secret
-    # is optional. Do not reference any precomputed secret flag here.
-    spreadsheet_id = get_spreadsheet_id()
-    source_label = (
-        "Streamlit Secrets"
-        if spreadsheet_id != HARDCODED_SHEET_ID
-        else "default Tetr master sheet fallback"
-    )
-    st.caption(f"Live source: Google Sheets · {source_label}")
     st.caption("What should we continue, optimize, consolidate or remove — and what could happen to payments and engagement if we do?")
     render_method_note()
+
+    spreadsheet_id = get_spreadsheet_id()
     tif_path = discover_tif_file()
     default_tif_date = get_default_tif_date()
 
@@ -2169,7 +2124,7 @@ def main():
             st.rerun()
 
     if not spreadsheet_id:
-        st.error("Google Sheet ID could not be resolved. This build should fall back automatically to the Tetr master sheet; verify that the latest v3 file is deployed.")
+        st.error("Add `GSHEET_SPREADSHEET_ID` to Streamlit Secrets, using the same setup as your existing dashboard.")
         st.stop()
     if not get_service_account_dict():
         st.error("Add `[GOOGLE_SERVICE_ACCOUNT]` to Streamlit Secrets, using the same service-account JSON as your existing dashboard.")
