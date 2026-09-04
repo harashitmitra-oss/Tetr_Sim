@@ -126,7 +126,7 @@ ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
-APP_BUILD_VERSION = "2026-09-04-v14-tif-under-hackathon-all-selected"
+APP_BUILD_VERSION = "2026-09-04-v15-label-update"
 HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 CONNECTION_BUILD = "WORKING_V3_FALLBACK_CONNECTION"
 # CONNECTION LOCK: copied unchanged from the v3/v7 build that successfully connected.
@@ -2026,7 +2026,7 @@ def render_overview(students: pd.DataFrame, attendance: pd.DataFrame, program: s
     c1.metric("Offered", f"{len(s):,}")
     c2.metric("Final admitted" if outcome_col == "is_final_admitted" else "Ever paid", f"{admitted:,}")
     c3.metric("Conversion", f"{pct(admitted, len(s)):.1f}%")
-    c4.metric("Core engaged before payment", f"{core_students:,}", f"{pct(core_students, len(s)):.1f}% of offered")
+    c4.metric("Engaged Before Payment / Deadline", f"{core_students:,}", f"{pct(core_students, len(s)):.1f}% of offered")
     c5.metric(outcome_transition_label(outcome_col), f"{pre_then_outcome:,}")
 
     if not pre.empty:
