@@ -4,7 +4,7 @@ Tetr UG / PG Activity Impact Simulator
 
 Purpose
 -------
-For each core activity (Online Event, Masterclass, Competition, Hackathon, TIF),
+For each core activity (Online Event, Masterclass, Competition, Hackathon — with TIF as a Hackathon sub-category),
 measure its observed relationship with:
   1) payment / final admission,
   2) subsequent engagement,
@@ -94,7 +94,7 @@ DATES_SHEET = "Dates"
 
 REQUIRED_SHEETS = MASTER_SHEETS + UG_BATCH_SHEETS + PG_BATCH_SHEETS + TX_SHEETS + [DATES_SHEET]
 
-CORE_TYPES = ["Online Event", "Masterclass", "Competition", "Hackathon", "TIF"]
+CORE_TYPES = ["Online Event", "Masterclass", "Competition", "Hackathon"]
 
 GSHEETS_SCOPES = [
     "https://spreadsheets.google.com/feeds",
@@ -126,7 +126,7 @@ ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
-APP_BUILD_VERSION = "2026-09-04-v12-checkbox-tree"
+APP_BUILD_VERSION = "2026-09-04-v14-tif-under-hackathon-all-selected"
 HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 CONNECTION_BUILD = "WORKING_V3_FALLBACK_CONNECTION"
 # CONNECTION LOCK: copied unchanged from the v3/v7 build that successfully connected.
@@ -477,10 +477,9 @@ def classify_core_type(event_type: str, event_name: str = "") -> Optional[str]:
     if "online event" in typ or "ama" in typ or (not typ and ("ama" in name or "webinar" in name or "online" in name)):
         return "Online Event"
     if "tif" in combined and "masterclass" not in combined:
-        # Explicit TIF participant file is added separately. This catches only
-        # genuinely TIF-typed source fields; explicit Poll/Quiz/General/Fun
-        # fields were already excluded above.
-        return "TIF"
+        # TIF is treated as a Hackathon subtype across the whole app.
+        # Explicit Poll/Quiz/General/Fun fields were already excluded above.
+        return "Hackathon"
     return None
 
 
@@ -816,6 +815,11 @@ def parse_activity_sheet(raw: pd.DataFrame, sheet_name: str) -> ParsedActivitySh
             event_info["event_name"].map(online_event_group),
             "",
         )
+        event_info["hackathon_group"] = np.where(
+            event_info["event_category"].eq("Hackathon"),
+            np.where(event_info["event_type_raw"].astype(str).str.contains(r"\btif\b", case=False, regex=True, na=False), "TIF", "Other Hackathons"),
+            "",
+        )
 
     event_cols = [c for c in event_info.get("column_name", pd.Series(dtype=str)).tolist() if c in df.columns]
     for c in event_cols:
@@ -1071,12 +1075,14 @@ def build_event_timeline(
             if is_explicit_non_core_type(raw_type):
                 continue
             group = clean_text(ev.get("online_group", "")) if category == "Online Event" else ""
+            hackathon_group = clean_text(ev.get("hackathon_group", "")) if category == "Hackathon" else ""
 
             occurrence_rows.append({
                 "event_date": pd.Timestamp(date).normalize(),
                 "event_name": name,
                 "event_category": category,
                 "online_group": group,
+                "hackathon_group": hackathon_group,
                 "event_type_raw": raw_type,
                 "source_sheet": sheet_name,
                 "program": parsed.program,
@@ -1096,6 +1102,7 @@ def build_event_timeline(
                     "event_name": name,
                     "event_category": category,
                     "online_group": group,
+                    "hackathon_group": hackathon_group,
                     "event_type_raw": raw_type,
                     "source_sheet": sheet_name,
                     "match_method": method,
@@ -1110,7 +1117,7 @@ def build_event_timeline(
     occ = pd.DataFrame(occurrence_rows)
     if not occ.empty:
         occ = (
-            occ.groupby(["program", "event_date", "event_name", "event_category", "online_group", "event_type_raw"], as_index=False)
+            occ.groupby(["program", "event_date", "event_name", "event_category", "online_group", "hackathon_group", "event_type_raw"], as_index=False)
             .agg(source_sheets=("source_sheet", lambda x: sorted(set(map(clean_text, x)))))
         )
 
@@ -1227,8 +1234,9 @@ def parse_tif_participation(
             "program": program,
             "event_date": pd.Timestamp(date).normalize(),
             "event_name": "Tetr Innovation Fund",
-            "event_category": "TIF",
+            "event_category": "Hackathon",
             "online_group": "",
+            "hackathon_group": "TIF",
             "event_type_raw": "TIF",
             "source_sheet": "Local TIF file",
             "match_method": method,
@@ -1238,7 +1246,7 @@ def parse_tif_participation(
     out = pd.DataFrame(rows)
     if not out.empty:
         # TIF counts as one engagement lever per student, as requested.
-        out = out.sort_values("event_date").drop_duplicates(["student_id", "event_category"], keep="first")
+        out = out.sort_values("event_date").drop_duplicates(["student_id", "event_category", "hackathon_group"], keep="first")
     return out, pd.DataFrame(unmatched)
 
 
@@ -1299,10 +1307,26 @@ def build_model(spreadsheet_id: str, tif_path: str, tif_default_date_iso: str):
         # TIF occurrence: one broad occurrence per date/program. Eligibility is
         # all offered students whose active pre-payment window covers the date.
         tif_occ = (
-            tif_att.groupby(["program", "event_date", "event_name", "event_category", "online_group", "event_type_raw"], as_index=False)
+            tif_att.groupby(["program", "event_date", "event_name", "event_category", "online_group", "hackathon_group", "event_type_raw"], as_index=False)
             .agg(source_sheets=("source_sheet", lambda x: sorted(set(x))))
         )
         occurrences = pd.concat([occurrences, tif_occ], ignore_index=True, sort=False) if not occurrences.empty else tif_occ
+
+    # Keep Hackathon sub-category metadata available consistently.
+    if not attendance.empty:
+        if "hackathon_group" not in attendance.columns:
+            attendance["hackathon_group"] = ""
+        attendance["hackathon_group"] = attendance["hackathon_group"].fillna("").astype(str)
+        missing_hack_group = attendance["event_category"].eq("Hackathon") & attendance["hackathon_group"].str.strip().eq("")
+        attendance.loc[missing_hack_group, "hackathon_group"] = "Other Hackathons"
+        attendance.loc[~attendance["event_category"].eq("Hackathon"), "hackathon_group"] = ""
+    if not occurrences.empty:
+        if "hackathon_group" not in occurrences.columns:
+            occurrences["hackathon_group"] = ""
+        occurrences["hackathon_group"] = occurrences["hackathon_group"].fillna("").astype(str)
+        missing_hack_group = occurrences["event_category"].eq("Hackathon") & occurrences["hackathon_group"].str.strip().eq("")
+        occurrences.loc[missing_hack_group, "hackathon_group"] = "Other Hackathons"
+        occurrences.loc[~occurrences["event_category"].eq("Hackathon"), "hackathon_group"] = ""
 
     # Enrich timeline once with student metadata.
     meta_cols = [
@@ -1331,7 +1355,7 @@ def build_model(spreadsheet_id: str, tif_path: str, tif_default_date_iso: str):
 @dataclass
 class TargetSpec:
     activity_type: str
-    mode: str = "all"       # all | online_group | event_name | multi
+    mode: str = "all"       # all | online_group | hackathon_group | event_name | multi
     value: str = ""
     # Multi-remove is represented as immutable tuples so the spec remains
     # deterministic and safe to pass through the existing impact engine.
@@ -1346,7 +1370,9 @@ class TargetSpec:
                 labels.append(part.label)
             return " + ".join(labels) if labels else "Multiple activities"
         if self.mode == "all":
-            return f"All {self.activity_type}s" if self.activity_type != "TIF" else "TIF"
+            return f"All {self.activity_type}s"
+        if self.mode == "hackathon_group":
+            return f"Hackathon — {self.value}"
         return self.value
 
 
@@ -1368,6 +1394,9 @@ def target_mask(df: pd.DataFrame, spec: TargetSpec) -> pd.Series:
     m = df["event_category"].astype(str).eq(spec.activity_type)
     if spec.mode == "online_group":
         m &= df["online_group"].astype(str).eq(spec.value)
+    elif spec.mode == "hackathon_group":
+        subgroup = df.get("hackathon_group", pd.Series("", index=df.index)).astype(str)
+        m &= subgroup.eq(spec.value)
     elif spec.mode == "event_name":
         m &= df["event_name"].astype(str).eq(spec.value)
     return m
@@ -1391,7 +1420,7 @@ def filter_valid_prepayment_events(attendance: pd.DataFrame) -> pd.DataFrame:
       * Tetr-X activity columns are post-payment sources and NEVER count as
         pre-payment attendance, even if a date anomaly makes an event appear on
         or before the stored payment date.
-      * TIF is allowed from the local TIF file and then date-windowed normally.
+      * TIF is allowed from the local TIF file as a Hackathon subtype and then date-windowed normally.
 
     Paid student window: Offer Date -> strictly BEFORE Payment Date.
     Same-calendar-date activity is excluded because date-level data cannot prove
@@ -1432,7 +1461,7 @@ def build_eligibility_index(
     sheets are excluded from conversion controls because they contain already-paid
     students by construction.
 
-    For TIF, the historical overall participant file does not contain an invite
+    For the Hackathon → TIF sub-category, the historical overall participant file does not contain an invite
     list, so eligibility is all offered students whose pre-payment window covers
     the TIF date. The dashboard labels this as broad TIF eligibility.
     """
@@ -1460,7 +1489,10 @@ def build_eligibility_index(
         # TIF uses broad offered-student eligibility. This check is event-row
         # based so it also works when TIF is one component of a multi-remove
         # scenario.
-        if clean_text(ev.get("event_category", "")) == "TIF":
+        if (
+            clean_text(ev.get("event_category", "")) == "Hackathon"
+            and clean_text(ev.get("hackathon_group", "")) == "TIF"
+        ):
             candidates = set(sprog["student_id"])
         else:
             candidates = set()
@@ -1941,6 +1973,16 @@ def compute_impact_matrix_cached(
     groups += sorted(g for g in present_groups if g not in set(AMA_GROUP_ORDER))
     specs.extend(TargetSpec("Online Event", "online_group", g) for g in groups)
 
+    # Hackathon sub-categories sit beneath the top-level Hackathon row.
+    if not pre.empty and "hackathon_group" in pre.columns:
+        present_hack_groups = set(
+            x for x in pre.loc[pre["event_category"].eq("Hackathon"), "hackathon_group"]
+            .dropna().astype(str).unique() if clean_text(x)
+        )
+        ordered_hack_groups = [g for g in ["TIF", "Other Hackathons"] if g in present_hack_groups]
+        ordered_hack_groups += sorted(g for g in present_hack_groups if g not in set(ordered_hack_groups))
+        specs.extend(TargetSpec("Hackathon", "hackathon_group", g) for g in ordered_hack_groups)
+
     rows = []
     for spec in specs:
         m, _, _ = evaluate_target(
@@ -2096,15 +2138,22 @@ def target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> 
             return TargetSpec("Online Event", "event_name", value)
         return TargetSpec("Online Event")
 
-    if activity_type == "TIF":
-        return TargetSpec("TIF")
-
+    level_options = [f"All {activity_type}s", "Individual Event"]
+    if activity_type == "Hackathon":
+        level_options.insert(1, "Hackathon Sub-category")
     level = st.radio(
         "Level",
-        [f"All {activity_type}s", "Individual Event"],
+        level_options,
         horizontal=True,
         key=f"{key_prefix}_level",
     )
+    if activity_type == "Hackathon" and level == "Hackathon Sub-category":
+        subgroup_series = pre.get("hackathon_group", pd.Series("", index=pre.index)).astype(str) if pre is not None and not pre.empty else pd.Series(dtype=str)
+        present = {x for x in subgroup_series if clean_text(x)}
+        ordered = [x for x in ["TIF", "Other Hackathons"] if x in present]
+        ordered += sorted(x for x in present if x not in set(ordered))
+        value = st.selectbox("Hackathon sub-category", ordered or ["Other Hackathons"], key=f"{key_prefix}_hackathon_group")
+        return TargetSpec("Hackathon", "hackathon_group", value)
     if level == "Individual Event":
         opts = sorted(
             x for x in pre.loc[
@@ -2127,12 +2176,8 @@ def _multi_target_options(attendance: pd.DataFrame, program: str) -> Dict[str, T
     pre = pre[pre["program"].eq(program)].copy() if pre is not None and not pre.empty else pre
     options: Dict[str, TargetSpec] = {}
 
-    # Whole activity types first.
+    # Whole activity types first. TIF sits under Hackathon.
     for activity_type in CORE_TYPES:
-        if activity_type == "TIF":
-            if pre is not None and not pre.empty and pre["event_category"].eq("TIF").any():
-                options["TIF — All TIF participation"] = TargetSpec("TIF")
-            continue
         if pre is not None and not pre.empty and pre["event_category"].eq(activity_type).any():
             options[f"{activity_type} — All"] = TargetSpec(activity_type)
 
@@ -2149,9 +2194,16 @@ def _multi_target_options(attendance: pd.DataFrame, program: str) -> Dict[str, T
     for group in ordered_groups:
         options[f"Online Event — {group}"] = TargetSpec("Online Event", "online_group", group)
 
-    # Individual events for every core type except TIF, which is one roster-level
-    # activity in the current source.
-    for activity_type in [t for t in CORE_TYPES if t != "TIF"]:
+    hack_groups = set(
+        x for x in pre.loc[pre["event_category"].eq("Hackathon"), "hackathon_group"]
+        .dropna().astype(str).unique() if clean_text(x)
+    ) if "hackathon_group" in pre.columns else set()
+    for group in [x for x in ["TIF", "Other Hackathons"] if x in hack_groups] + sorted(x for x in hack_groups if x not in {"TIF", "Other Hackathons"}):
+        options[f"Hackathon — {group}"] = TargetSpec("Hackathon", "hackathon_group", group)
+
+    # Individual events for every core type. TIF appears as the
+    # "Tetr Innovation Fund" Hackathon leaf.
+    for activity_type in CORE_TYPES:
         names = sorted(
             x for x in pre.loc[pre["event_category"].eq(activity_type), "event_name"]
             .dropna().astype(str).unique() if x
@@ -2212,11 +2264,7 @@ def _compress_checkbox_specs(pre: pd.DataFrame, selected_leaf_specs: Sequence[Ta
 
     out: List[TargetSpec] = []
 
-    # TIF is one roster-level activity in the current source.
-    if any(s.activity_type == "TIF" for s in selected_leaf_specs):
-        out.append(TargetSpec("TIF"))
-
-    for activity_type in [t for t in CORE_TYPES if t != "TIF"]:
+    for activity_type in CORE_TYPES:
         type_pre = pre[pre["event_category"].eq(activity_type)].copy()
         all_events = {
             clean_text(x) for x in type_pre.get("event_name", pd.Series(dtype=str)).dropna().astype(str).unique()
@@ -2255,6 +2303,22 @@ def _compress_checkbox_specs(pre: pd.DataFrame, selected_leaf_specs: Sequence[Ta
                 }
                 if group_events and group_events.issubset(remaining):
                     out.append(TargetSpec("Online Event", "online_group", group))
+                    remaining -= group_events
+
+        if activity_type == "Hackathon" and "hackathon_group" in type_pre.columns:
+            present_hack_groups = [g for g in ["TIF", "Other Hackathons"] if g in set(type_pre["hackathon_group"].dropna().astype(str))]
+            present_hack_groups += sorted(
+                g for g in set(type_pre["hackathon_group"].dropna().astype(str))
+                if g and g not in set(present_hack_groups)
+            )
+            for group in present_hack_groups:
+                group_events = {
+                    clean_text(x) for x in type_pre.loc[
+                        type_pre["hackathon_group"].astype(str).eq(group), "event_name"
+                    ].dropna().astype(str).unique() if clean_text(x)
+                }
+                if group_events and group_events.issubset(remaining):
+                    out.append(TargetSpec("Hackathon", "hackathon_group", group))
                     remaining -= group_events
 
         for event_name in sorted(remaining):
@@ -2297,9 +2361,9 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
 
     # Build every atomic leaf first. The simulator uses these leaf states as truth.
     leaf_meta: List[Dict[str, str]] = []
-    for activity_type in [t for t in CORE_TYPES if t != "TIF"]:
+    for activity_type in CORE_TYPES:
         subset = pre[pre["event_category"].eq(activity_type)].copy()
-        cols_needed = [c for c in ["event_name", "online_group"] if c in subset.columns]
+        cols_needed = [c for c in ["event_name", "online_group", "hackathon_group"] if c in subset.columns]
         subset = subset[cols_needed].drop_duplicates() if cols_needed else pd.DataFrame()
         if subset.empty:
             continue
@@ -2308,35 +2372,48 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
             if not event_name:
                 continue
             online_group = clean_text(row.get("online_group", "")) if activity_type == "Online Event" else ""
-            key = _checkbox_state_key(key_prefix, "multi_leaf", activity_type, online_group, event_name)
+            hackathon_group = clean_text(row.get("hackathon_group", "")) if activity_type == "Hackathon" else ""
+            key = _checkbox_state_key(key_prefix, "multi_leaf", activity_type, online_group, hackathon_group, event_name)
             leaf_meta.append({
                 "activity_type": activity_type,
                 "online_group": online_group,
+                "hackathon_group": hackathon_group,
                 "event_name": event_name,
                 "key": key,
             })
-
-    tif_present = bool(pre["event_category"].eq("TIF").any())
-    tif_key = _checkbox_state_key(key_prefix, "multi_leaf", "TIF", "Tetr Innovation Fund")
-    if tif_present:
-        leaf_meta.append({
-            "activity_type": "TIF", "online_group": "", "event_name": "Tetr Innovation Fund", "key": tif_key
-        })
 
     # Pre-compute bulk keys so global/type bulk toggles can keep the visible controls aligned.
     type_bulk_keys: Dict[str, str] = {
         t: _checkbox_state_key(key_prefix, "bulk_type", t) for t in CORE_TYPES
     }
     group_bulk_keys: Dict[str, str] = {}
+    hackathon_bulk_keys: Dict[str, str] = {}
     online_groups = sorted({m["online_group"] for m in leaf_meta if m["activity_type"] == "Online Event" and m["online_group"]})
     ordered_groups = [g for g in AMA_GROUP_ORDER if g in online_groups]
     ordered_groups += [g for g in online_groups if g not in set(ordered_groups)]
     for group in ordered_groups:
         group_bulk_keys[group] = _checkbox_state_key(key_prefix, "bulk_group", group)
+    hackathon_groups = sorted({m.get("hackathon_group", "") for m in leaf_meta if m["activity_type"] == "Hackathon" and m.get("hackathon_group", "")})
+    ordered_hackathon_groups = [g for g in ["TIF", "Other Hackathons"] if g in hackathon_groups]
+    ordered_hackathon_groups += [g for g in hackathon_groups if g not in set(ordered_hackathon_groups)]
+    for group in ordered_hackathon_groups:
+        hackathon_bulk_keys[group] = _checkbox_state_key(key_prefix, "bulk_hackathon_group", group)
 
     all_leaf_keys = [m["key"] for m in leaf_meta]
-    all_linked_bulk_keys = list(type_bulk_keys.values()) + list(group_bulk_keys.values())
+    all_linked_bulk_keys = list(type_bulk_keys.values()) + list(group_bulk_keys.values()) + list(hackathon_bulk_keys.values())
     global_bulk_key = _checkbox_state_key(key_prefix, "bulk_all_core")
+
+    # Multi-remove starts with every available activity selected. Initialize once
+    # for this build/program; after that, user deselections persist normally.
+    defaults_init_key = f"{key_prefix}_multi_defaults_initialized_{APP_BUILD_VERSION}"
+    if not st.session_state.get(defaults_init_key, False):
+        for key in all_leaf_keys + all_linked_bulk_keys + [global_bulk_key]:
+            st.session_state[key] = True
+        st.session_state[defaults_init_key] = True
+    else:
+        for key in all_leaf_keys + all_linked_bulk_keys + [global_bulk_key]:
+            st.session_state.setdefault(key, True)
+
     st.checkbox(
         "Select / clear ALL core activities",
         key=global_bulk_key,
@@ -2382,13 +2459,13 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
                 st.caption(f"Selected {selected_in_group} of {len(items)} in {group}")
                 st.markdown("")
 
-    # MASTERCLASS / COMPETITION / HACKATHON: type -> individual activity.
+    # MASTERCLASS / COMPETITION: type -> individual activity.
     display_names = {
         "Masterclass": "Masterclasses",
         "Competition": "Competitions",
         "Hackathon": "Hackathons",
     }
-    for activity_type in ["Masterclass", "Competition", "Hackathon"]:
+    for activity_type in ["Masterclass", "Competition"]:
         items = [m for m in leaf_meta if m["activity_type"] == activity_type]
         if not items:
             continue
@@ -2407,23 +2484,49 @@ def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: st
             selected_n = sum(bool(st.session_state.get(m["key"], False)) for m in items)
             st.caption(f"Selected {selected_n} of {len(items)} {display_names[activity_type].lower()}")
 
-    # TIF is one leaf in the current manually uploaded roster.
-    if tif_present:
-        with st.expander("TIF", expanded=False):
-            st.checkbox("Remove TIF participation", key=tif_key)
+    # HACKATHON: type -> sub-category (including TIF) -> individual activity.
+    hackathon_items = [m for m in leaf_meta if m["activity_type"] == "Hackathon"]
+    if hackathon_items:
+        with st.expander(f"Hackathons · {len(hackathon_items)} individual activities", expanded=False):
+            hack_leaf_keys = [m["key"] for m in hackathon_items]
+            hack_group_keys = [hackathon_bulk_keys[g] for g in ordered_hackathon_groups]
+            st.checkbox(
+                "Select / clear all Hackathons",
+                key=type_bulk_keys["Hackathon"],
+                on_change=_apply_bulk_checkbox,
+                args=(type_bulk_keys["Hackathon"], hack_leaf_keys, hack_group_keys),
+            )
+            st.caption("TIF is a Hackathon sub-category. Sub-category checkboxes are bulk selectors; individual activity boxes remain the final selection.")
+
+            grouped_hack = {}
+            for item in hackathon_items:
+                grouped_hack.setdefault(item.get("hackathon_group", "") or "Other Hackathons", []).append(item)
+            hack_order = [g for g in ["TIF", "Other Hackathons"] if g in grouped_hack]
+            hack_order += sorted(g for g in grouped_hack if g not in set(hack_order))
+            for group in hack_order:
+                items = sorted(grouped_hack[group], key=lambda x: x["event_name"].lower())
+                group_key = hackathon_bulk_keys.setdefault(group, _checkbox_state_key(key_prefix, "bulk_hackathon_group", group))
+                st.markdown(f"**{group}**")
+                st.checkbox(
+                    f"Select / clear all in {group}",
+                    key=group_key,
+                    on_change=_apply_bulk_checkbox,
+                    args=(group_key, [m["key"] for m in items], ()),
+                )
+                _render_leaf_checkbox_grid([(m["event_name"], m["key"]) for m in items], columns=2)
+                selected_in_group = sum(bool(st.session_state.get(m["key"], False)) for m in items)
+                st.caption(f"Selected {selected_in_group} of {len(items)} in {group}")
+                st.markdown("")
 
     selected_leaf_specs: List[TargetSpec] = []
     for item in leaf_meta:
         if not bool(st.session_state.get(item["key"], False)):
             continue
-        if item["activity_type"] == "TIF":
-            selected_leaf_specs.append(TargetSpec("TIF"))
-        else:
-            selected_leaf_specs.append(TargetSpec(item["activity_type"], "event_name", item["event_name"]))
+        selected_leaf_specs.append(TargetSpec(item["activity_type"], "event_name", item["event_name"]))
 
     selected_leaf_count = len(selected_leaf_specs)
     if selected_leaf_count == 0:
-        st.info("Tick one or more activity checkboxes to see the combined removal scenario.")
+        st.info("Tick one or more activity checkboxes, then click **Show Analysis** below.")
         return None
 
     st.success(f"{selected_leaf_count} individual activit{'y' if selected_leaf_count == 1 else 'ies'} selected for removal.")
@@ -2454,10 +2557,53 @@ def render_removal_simulator(
         help="Tick this only when you want to test one combined scenario with multiple activities removed. Leave it unticked to keep the existing single-activity simulator unchanged.",
     )
     if multi_remove:
-        spec = multi_target_selector(attendance, program, key_prefix=program.lower())
-        if spec is None:
+        # Checkbox selections are only a draft until the user explicitly clicks
+        # Show Analysis. This prevents every checkbox tick/untick from immediately
+        # recalculating the whole combined-removal scenario.
+        candidate_spec = multi_target_selector(attendance, program, key_prefix=program.lower())
+        applied_key = f"{program.lower()}_multi_remove_applied_spec"
+
+        if candidate_spec is None:
+            # No active selection -> no stale multi-removal analysis should remain.
+            st.session_state.pop(applied_key, None)
+            st.button(
+                "Show Analysis",
+                key=f"{program.lower()}_show_multi_remove_analysis",
+                type="primary",
+                use_container_width=True,
+                disabled=True,
+            )
             return
+
+        show_clicked = st.button(
+            "Show Analysis",
+            key=f"{program.lower()}_show_multi_remove_analysis",
+            type="primary",
+            use_container_width=True,
+            help="Run the combined removal analysis using exactly the activities currently ticked above.",
+        )
+        # Store a plain immutable signature rather than the dataclass instance.
+        # Streamlit reruns recreate the script class definitions, while tuples remain
+        # stable across reruns and therefore compare reliably.
+        candidate_signature = (
+            candidate_spec.activity_type,
+            candidate_spec.mode,
+            candidate_spec.value,
+            tuple(candidate_spec.components),
+        )
+        if show_clicked:
+            st.session_state[applied_key] = candidate_signature
+
+        applied_signature = st.session_state.get(applied_key)
+        if applied_signature != candidate_signature:
+            st.info("Selections are ready. Click **Show Analysis** to calculate this exact combination.")
+            return
+
+        # Use the current-rerun TargetSpec after the saved signature confirms the
+        # user explicitly requested analysis for this exact checkbox combination.
+        spec = candidate_spec
     else:
+        # Existing single-activity removal flow is intentionally unchanged.
         spec = target_selector(attendance, program, key_prefix=program.lower())
 
     metrics, features, eligible_idx = evaluate_target(
@@ -2626,8 +2772,9 @@ def render_student_journeys(students: pd.DataFrame, attendance: pd.DataFrame, pr
     if ev.empty:
         st.info("No pre-payment core activity participation found.")
         return
-    st.caption("Pre-payment only: core batch-sheet activity strictly before payment date, plus qualifying TIF participation. Same-date activity/payment is excluded. Tetr-X attendance is excluded.")
-    st.dataframe(ev[["event_date", "event_category", "online_group", "event_name", "source_sheet", "origin"]], use_container_width=True, hide_index=True)
+    st.caption("Pre-payment only: core batch-sheet activity strictly before payment date, plus qualifying TIF participation under Hackathon. Same-date activity/payment is excluded. Tetr-X attendance is excluded.")
+    journey_cols = [c for c in ["event_date", "event_category", "online_group", "hackathon_group", "event_name", "source_sheet", "origin"] if c in ev.columns]
+    st.dataframe(ev[journey_cols], use_container_width=True, hide_index=True)
 
 
 def render_methodology(data: Dict, tif_path: Optional[Path]):
@@ -2703,13 +2850,13 @@ def render_methodology(data: Dict, tif_path: Optional[Path]):
         This simulator is deliberately strict: **only core activity participation from UG/PG batch sheets from Offer Date up to the day before Payment Date is used for paid students**. For unpaid students the window is Offer Date → Deadline. Because source data is date-level, an event on the same calendar date as payment is **excluded**: the sequence cannot be proven. Payment must occur on a later calendar date than the activity. **Tetr-X activity columns are never counted as pre-payment attendance**; Tetr-X is used for payment date/status only.
 
         **Core activities**  
-        Online Event, Masterclass, Competition, Hackathon and TIF only. General, General Activity, Fun, Fun Task, Poll and Quiz are hard-excluded everywhere, even if their title contains words such as TIF, AMA, webinar or challenge.
+        Online Event, Masterclass, Competition and Hackathon only; **TIF is included inside Hackathon as a sub-category**. General, General Activity, Fun, Fun Task, Poll and Quiz are hard-excluded everywhere, even if their title contains words such as TIF, AMA, webinar or challenge.
 
         **Online Event / AMA categories**  
         Uses the previous dashboard's categories: AMA Welcome Webinar; AMA Pratham; AMA Tarun; AMA Amitoj; AMA Garima; AMA Capstone; AMA Life at Tetr; and Other Online Event. Individual Online Events remain selectable separately.
 
-        **TIF**  
-        The local `Tetr Innovation Fund - Overall Data` file is treated as the participation roster: each matched UG/PG student counts once as TIF. If the file has no participation-date column, the sidebar TIF fallback date is used. TIF only enters a student's pre-payment analysis when that date is within the student's valid pre-payment window.
+        **Hackathon → TIF sub-category**  
+        TIF is treated as a Hackathon subtype throughout the app. The local `Tetr Innovation Fund - Overall Data` file is the TIF participation roster: each matched UG/PG student counts once under **Hackathon → TIF**. If the file has no participation-date column, the sidebar TIF fallback date is used. TIF only enters a student's pre-payment analysis when that date is within the student's valid pre-payment window.
 
         **Eligible non-attendee comparison**  
         Controls come from students present in the batch/source sheets where that event occurred and whose active Offer → Payment/Deadline window covered that date. Tetr-X-only populations are excluded from the control pool.
