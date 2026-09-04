@@ -2161,7 +2161,7 @@ def main():
     }
 
     st.header(f"{program} Impact Analysis")
-    render_overview(students, attendance, program, outcome_col)
+    render_overview(students, attendance, program, outcome_col
 
     matrix = compute_impact_matrix_cached(
         students, attendance, occurrences, membership, program, outcome_col,
