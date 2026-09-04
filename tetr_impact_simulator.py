@@ -15,10 +15,9 @@ then simulate the likely *risk* if that activity is removed.
 
 Data source
 -----------
-Uses the same Streamlit Secrets + Google Sheets connection pattern as the
-existing Tetr analytics app:
-
-    GSHEET_SPREADSHEET_ID = "..."
+Uses the same Google service-account connection as the existing Tetr analytics app.
+The production New Master Engagement spreadsheet ID is fixed in this app, so
+`GSHEET_SPREADSHEET_ID` is NOT required in Streamlit Secrets. Only:
 
     [GOOGLE_SERVICE_ACCOUNT]
     type = "service_account"
@@ -101,30 +100,46 @@ GSHEETS_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# The first pass groups online events by obvious speaker names. Unknown online
-# events remain available individually, so nothing is lost because a speaker was
-# not in this dictionary.
+# Online-event / AMA categories intentionally match the existing Tetr dashboard.
+# These are CATEGORY labels only; every individual online event remains separately
+# selectable in the removal simulator.
+AMA_GROUP_ORDER = [
+    "AMA Welcome Webinar",
+    "AMA Pratham",
+    "AMA Tarun",
+    "AMA Amitoj",
+    "AMA Garima",
+    "AMA Capstone",
+    "AMA Life at Tetr",
+    "Other Online Event",
+]
+
 ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
-    "Pratham": [r"\bpratham\b"],
-    "Tarun": [r"\btarun\b"],
-    "Garima": [r"\bgarima\b"],
-    "Mohammed": [r"\bmohammed\b", r"\bmohamed\b", r"\bmuhammad\b"],
-    "Priyank": [r"\bpriyank\b"],
-    "Kevin / Kevyn": [r"\bkevin\b", r"\bkevyn\b"],
-    "Karim": [r"\bkarim\b"],
+    "AMA Welcome Webinar": [r"shahrose", r"welcome\s+webinar", r"harshit"],
+    "AMA Pratham": [r"pratham"],
+    "AMA Tarun": [r"tarun"],
+    "AMA Amitoj": [r"amitoj"],
+    "AMA Garima": [r"garima"],
+    "AMA Capstone": [r"kritee", r"ayush", r"saarthak", r"sarthak", r"capstone"],
+    "AMA Life at Tetr": [r"jessica", r"yuliia", r"yulia", r"life\s+at\s+tetr"],
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
+APP_BUILD_VERSION = "2026-09-04-v10-working-connection-locked"
+HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
+CONNECTION_BUILD = "WORKING_V3_FALLBACK_CONNECTION"
+# CONNECTION LOCK: copied unchanged from the v3/v7 build that successfully connected.
 
-# Visual palette kept close to the existing Tetr dashboard.
+# Palette and surface treatment copied from the previous Tetr Analytics dashboard.
 GREEN = "#0b3d2e"
 GREEN_2 = "#1f7a56"
 GREEN_3 = "#56a77b"
-LIGHT = "#f5faf7"
-AMBER = "#d99a00"
-RED = "#b83232"
-DARK = "#17352b"
-
+GREEN_4 = "#9cd4b5"
+GREEN_5 = "#dff3e7"
+DARK = "#12372a"
+LIGHT_BG = "#f7fbf8"
+RED = "#d9534f"
+AMBER = "#ffb000"
 
 # -----------------------------------------------------------------------------
 # CSS
@@ -134,27 +149,128 @@ def inject_css() -> None:
     st.markdown(
         f"""
         <style>
-        .stApp {{ background: linear-gradient(180deg, #ffffff 0%, {LIGHT} 100%); }}
-        section[data-testid="stSidebar"] {{ background: #f4faf6; border-right: 1px solid #dcebe1; }}
-        div[data-testid="stMetric"] {{
-            background: white;
-            border: 1px solid #dfece4;
-            padding: 12px 14px;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.025);
+        .stApp {{
+            background: linear-gradient(180deg, #ffffff 0%, {LIGHT_BG} 100%);
         }}
+        section[data-testid="stSidebar"] {{
+            background: #f3faf5;
+            border-right: 1px solid #d9eee1;
+        }}
+        .hero-card {{
+            background: linear-gradient(135deg, #ffffff 0%, #eef8f2 100%);
+            border: 1px solid #d8eadf;
+            border-radius: 22px;
+            padding: 18px 22px;
+            box-shadow: 0 8px 24px rgba(11, 61, 46, 0.06);
+            margin-bottom: 12px;
+        }}
+        .live-pill {{
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 8px 12px; border-radius: 999px; font-weight: 800;
+            border: 1px solid #cfe8d9; color: {GREEN}; background: #e8f6ed;
+        }}
+        .heartbeat-dot {{
+            width: 9px; height: 9px; border-radius: 50%;
+            background: #1bb55c; display:inline-block;
+        }}
+        div[data-testid="stMetric"] {{
+            background: #ffffff;
+            border: 1px solid #dbeee0;
+            border-radius: 16px;
+            padding: 10px 12px;
+            box-shadow: 0 2px 10px rgba(11, 61, 46, 0.05);
+        }}
+        div[data-testid="stMetric"] label {{ color: {GREEN_2} !important; font-weight: 700 !important; }}
+        h1, h2, h3 {{ color: {DARK} !important; }}
+        .stTabs [data-baseweb="tab-list"] {{ gap: 8px; }}
+        .stTabs [data-baseweb="tab"] {{
+            background: #edf8f1;
+            border: 1px solid #d6eadc;
+            border-radius: 12px;
+            padding: 10px 14px;
+        }}
+        .stTabs [aria-selected="true"] {{ background: #dff3e7; border-color: #8fcaab; }}
         .impact-note {{
             background:#ffffff; border:1px solid #dfece4; border-left:4px solid {GREEN_2};
             padding:12px 14px; border-radius:8px; margin:8px 0 14px 0;
         }}
-        .risk-high {{ color:{RED}; font-weight:700; }}
-        .risk-med {{ color:{AMBER}; font-weight:700; }}
-        .risk-low {{ color:{GREEN_2}; font-weight:700; }}
+
+        /* Same active-left-border navigation treatment as the previous dashboard. */
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] {{
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 6px !important;
+            width: 100% !important;
+            margin-top: 4px !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{
+            position: relative !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+            min-height: 40px !important;
+            margin: 0 !important;
+            padding: 0 12px 0 48px !important;
+            border-radius: 12px !important;
+            border: 1px solid transparent !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            color: #12372a !important;
+            cursor: pointer !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {{
+            background: #eef8f2 !important;
+            border-color: #d6eadc !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {{
+            background: #dff3e7 !important;
+            border-color: #8fcaab !important;
+            color: #0b3d2e !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked)::before {{
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 6px;
+            bottom: 6px;
+            width: 6px;
+            border-radius: 999px;
+            background: #1f7a56;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input[type="radio"]) > div:first-child {{
+            display: none !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label p {{
+            width: 100% !important;
+            text-align: left !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            color: #12372a !important;
+            font-weight: 650 !important;
+            font-size: 0.93rem !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) p {{
+            color: #0b3d2e !important;
+            font-weight: 800 !important;
+        }}
+        section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label::after {{
+            content: "🎓";
+            position:absolute;
+            left:16px;
+            top:50%;
+            transform:translateY(-50%);
+            font-size:16px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 
 inject_css()
 
@@ -320,10 +436,36 @@ def safe_int(x) -> int:
         return 0
 
 
+NON_CORE_TYPE_TOKENS = {
+    "general", "general activity", "fun", "fun task", "poll", "quiz",
+    "tetr app quiz", "survey", "introduction",
+}
+
+def is_explicit_non_core_type(event_type: str) -> bool:
+    """True when the source sheet explicitly types a row as non-core.
+
+    Source type always wins over keywords in the event name. This prevents a
+    Poll such as "Are you joining the TIF 2026 Launch Event today?" from
+    being reclassified as TIF simply because its title contains "TIF".
+    """
+    typ = clean_text(event_type).lower().strip()
+    typ = re.sub(r"\s+", " ", typ)
+    if not typ:
+        return False
+    if typ in NON_CORE_TYPE_TOKENS:
+        return True
+    return any(token in typ for token in ["poll", "quiz", "fun task", "general activity"])
+
 def classify_core_type(event_type: str, event_name: str = "") -> Optional[str]:
     typ = clean_text(event_type).lower()
     name = clean_text(event_name).lower()
     combined = f"{typ} {name}"
+
+    # Hard exclusion: explicit source labels Poll / Quiz / General / Fun etc.
+    # must never enter any impact section, even when the event title contains
+    # words such as TIF, AMA, challenge or webinar.
+    if is_explicit_non_core_type(typ):
+        return None
 
     if "hackathon" in typ or (not typ and "hackathon" in name):
         return "Hackathon"
@@ -334,8 +476,9 @@ def classify_core_type(event_type: str, event_name: str = "") -> Optional[str]:
     if "online event" in typ or "ama" in typ or (not typ and ("ama" in name or "webinar" in name or "online" in name)):
         return "Online Event"
     if "tif" in combined and "masterclass" not in combined:
-        # Explicit TIF participant file is added separately. This branch only
-        # catches a typed TIF field if one appears in the Google Sheet later.
+        # Explicit TIF participant file is added separately. This catches only
+        # genuinely TIF-typed source fields; explicit Poll/Quiz/General/Fun
+        # fields were already excluded above.
         return "TIF"
     return None
 
@@ -365,12 +508,45 @@ def nice_layout(fig, height: int = 380):
 # -----------------------------------------------------------------------------
 # GOOGLE SHEETS CONNECTION - SAME PATTERN AS EXISTING APP
 # -----------------------------------------------------------------------------
+# LOCKED: copied verbatim from the v3 build that successfully connected in Streamlit.
+# Do not change this block unless the data source itself changes.
 
 def get_spreadsheet_id() -> str:
+    """Resolve the live New Master Engagement sheet ID.
+
+    This intentionally mirrors the older deployed Tetr dashboard: Streamlit
+    Secrets can override the ID, but the known master sheet ID is also kept as
+    a fallback so the app does not fail when only GOOGLE_SERVICE_ACCOUNT is
+    configured in Secrets.
+    """
     try:
-        return clean_text(st.secrets.get("GSHEET_SPREADSHEET_ID", ""))
+        # Primary key used by the existing dashboards.
+        value = st.secrets.get("GSHEET_SPREADSHEET_ID", "")
+        if clean_text(value):
+            return clean_text(value)
+
+        # Accept a couple of harmless aliases in case the secret was named
+        # differently in a deployment.
+        for key in ("GOOGLE_SHEET_ID", "SPREADSHEET_ID"):
+            value = st.secrets.get(key, "")
+            if clean_text(value):
+                return clean_text(value)
+
+        # Optional nested layouts.
+        for section in ("GSHEETS", "google_sheets", "sheets"):
+            try:
+                block = st.secrets.get(section, {})
+                if block:
+                    for key in ("spreadsheet_id", "sheet_id", "id"):
+                        value = block.get(key, "")
+                        if clean_text(value):
+                            return clean_text(value)
+            except Exception:
+                pass
     except Exception:
-        return ""
+        pass
+
+    return HARDCODED_SHEET_ID
 
 
 def get_service_account_dict() -> Dict:
@@ -888,6 +1064,11 @@ def build_event_timeline(
             name = clean_text(ev.get("event_name", "")) or clean_text(ev.get("column_name", ""))
             col = clean_text(ev.get("column_name", ""))
             raw_type = clean_text(ev.get("event_type_raw", ""))
+            # Defense in depth: an explicitly non-core source type can never
+            # enter occurrences/attendance, even if an upstream classification
+            # changes in a future edit.
+            if is_explicit_non_core_type(raw_type):
+                continue
             group = clean_text(ev.get("online_group", "")) if category == "Online Event" else ""
 
             occurrence_rows.append({
@@ -1018,19 +1199,9 @@ def parse_tif_participation(
     if not name_col and not email_col:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Participation definition for the historical Overall TIF file:
-    # - Submitted / shortlisted records are participation.
-    # - Lead records count only after moving beyond Step 0 (or when a venture is present).
-    # This prevents plain untouched leads from being treated as TIF engagement.
-    status_s = df[status_col].map(clean_text).str.lower() if status_col else pd.Series("", index=df.index)
-    step_s = df[step_col].map(clean_text).str.lower() if step_col else pd.Series("", index=df.index)
-    venture_s = df[venture_col].map(clean_text) if venture_col else pd.Series("", index=df.index)
-    explicit_engaged = status_s.isin({"submitted", "shortlisted"})
-    step_engaged = step_s.ne("") & ~step_s.str.contains(r"step\s*0\s*of", regex=True, na=False)
-    venture_engaged = venture_s.ne("") & ~step_s.str.contains(r"step\s*0\s*of", regex=True, na=False)
-    if status_col or step_col or venture_col:
-        keep_mask = explicit_engaged | step_engaged | venture_engaged
-        df = df[keep_mask].copy()
+    # The supplied "Tetr Innovation Fund - Overall Data" file is treated as the
+    # TIF participation roster. Every valid UG/PG row counts as one TIF lever.
+    # Status / Step / Venture are context fields and do not gate participation.
 
     rows = []
     unmatched = []
@@ -1191,6 +1362,20 @@ def student_active_end(row: pd.Series) -> pd.Timestamp:
 
 
 def filter_valid_prepayment_events(attendance: pd.DataFrame) -> pd.DataFrame:
+    """Return ONLY pre-payment engagement used by every impact calculation.
+
+    Source rule mirrors the existing Tetr dashboard:
+      * Batch-sheet core activities may count before payment.
+      * Tetr-X activity columns are post-payment sources and NEVER count as
+        pre-payment attendance, even if a date anomaly makes an event appear on
+        or before the stored payment date.
+      * TIF is allowed from the local TIF file and then date-windowed normally.
+
+    Paid student window: Offer Date -> strictly BEFORE Payment Date.
+    Same-calendar-date activity is excluded because date-level data cannot prove
+    that the activity happened before the payment.
+    Unpaid student window: Offer Date -> Deadline.
+    """
     if attendance is None or attendance.empty:
         return pd.DataFrame(columns=attendance.columns if attendance is not None else [])
     df = attendance.copy()
@@ -1199,10 +1384,16 @@ def filter_valid_prepayment_events(attendance: pd.DataFrame) -> pd.DataFrame:
     df["payment_date"] = pd.to_datetime(df["payment_date"], errors="coerce")
     df["deadline"] = pd.to_datetime(df["deadline"], errors="coerce")
 
+    source = df.get("source_sheet", pd.Series("", index=df.index)).astype(str)
+    raw_type = df.get("event_type_raw", pd.Series("", index=df.index)).astype(str)
+    allowed_source = ~source.isin(TX_SHEETS)
+    core_type_only = ~raw_type.map(is_explicit_non_core_type)
     after_offer = df["offered_date"].isna() | df["event_date"].ge(df["offered_date"])
-    pre_paid = df["payment_date"].isna() | df["event_date"].le(df["payment_date"])
+    # STRICT: payment must be on a later calendar date than the activity.
+    # Same-date payment/activity is excluded because sequence is unknowable.
+    pre_paid = df["payment_date"].isna() | df["event_date"].lt(df["payment_date"])
     before_deadline_for_unpaid = df["payment_date"].notna() | df["deadline"].isna() | df["event_date"].le(df["deadline"])
-    return df[after_offer & pre_paid & before_deadline_for_unpaid].copy()
+    return df[allowed_source & core_type_only & after_offer & pre_paid & before_deadline_for_unpaid].copy()
 
 
 def build_eligibility_index(
@@ -1258,10 +1449,16 @@ def build_eligibility_index(
                 continue
             sr = smap.loc[sid]
             offered = pd.to_datetime(sr.get("offered_date"), errors="coerce")
-            end = student_active_end(sr)
+            payment = pd.to_datetime(sr.get("payment_date"), errors="coerce")
+            deadline = pd.to_datetime(sr.get("deadline"), errors="coerce")
             if pd.notna(offered) and ev_date < offered:
                 continue
-            if pd.notna(end) and ev_date > end:
+            # Eligibility follows the same strict pre-payment rule as attendance:
+            # a paid student is no longer eligible on the payment date itself.
+            if pd.notna(payment):
+                if ev_date >= payment:
+                    continue
+            elif pd.notna(deadline) and ev_date > deadline:
                 continue
             rows.append({"student_id": sid, "index_date": ev_date, "event_name": ev["event_name"]})
 
@@ -1382,7 +1579,7 @@ def compute_target_student_features(
             first_touch = prior_total == 0
 
         if pd.notna(payment) and not g_pre.empty:
-            between = g_pre[(g_pre["event_date"].gt(last_dt)) & (g_pre["event_date"].le(payment))]
+            between = g_pre[(g_pre["event_date"].gt(last_dt)) & (g_pre["event_date"].lt(payment))]
             last_touch = between.empty
 
         catalyst = before <= 1 and after >= catalyst_after_count
@@ -1705,13 +1902,17 @@ def compute_impact_matrix_cached(
 ) -> pd.DataFrame:
     specs = [TargetSpec(t) for t in CORE_TYPES]
 
-    # Add speaker/category rows inside Online Events.
-    groups = sorted(
-        g for g in attendance.loc[
-            (attendance["program"].eq(program)) & attendance["event_category"].eq("Online Event"), "online_group"
-        ].dropna().astype(str).unique()
-        if g
+    # Add the same AMA categories used by the existing dashboard. Build the list
+    # from strict pre-payment attendance so post-payment-only Online Events do not
+    # appear as impact categories.
+    pre = filter_valid_prepayment_events(attendance)
+    present_groups = set(
+        g for g in pre.loc[
+            (pre["program"].eq(program)) & pre["event_category"].eq("Online Event"), "online_group"
+        ].dropna().astype(str).unique() if g
     )
+    groups = [g for g in AMA_GROUP_ORDER if g in present_groups]
+    groups += sorted(g for g in present_groups if g not in set(AMA_GROUP_ORDER))
     specs.extend(TargetSpec("Online Event", "online_group", g) for g in groups)
 
     rows = []
@@ -1749,11 +1950,16 @@ def render_overview(students: pd.DataFrame, attendance: pd.DataFrame, program: s
     core_students = pre["student_id"].nunique() if not pre.empty else 0
     admitted = int(s[outcome_col].sum())
 
-    c1, c2, c3, c4 = st.columns(4)
+    outcome_ids = set(s.loc[s[outcome_col].fillna(False).astype(bool), "student_id"])
+    pre_ids = set(pre["student_id"]) if not pre.empty else set()
+    pre_then_outcome = len(pre_ids & outcome_ids)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Offered", f"{len(s):,}")
     c2.metric("Final admitted" if outcome_col == "is_final_admitted" else "Ever paid", f"{admitted:,}")
     c3.metric("Conversion", f"{pct(admitted, len(s)):.1f}%")
-    c4.metric("Core engaged pre-payment", f"{core_students:,}", f"{pct(core_students, len(s)):.1f}% of offered")
+    c4.metric("Core engaged before payment", f"{core_students:,}", f"{pct(core_students, len(s)):.1f}% of offered")
+    c5.metric(outcome_transition_label(outcome_col), f"{pre_then_outcome:,}")
 
     if not pre.empty:
         by_type = (
@@ -1766,13 +1972,17 @@ def render_overview(students: pd.DataFrame, attendance: pd.DataFrame, program: s
         st.plotly_chart(nice_layout(fig, 360), use_container_width=True)
 
 
-def style_matrix_display(matrix: pd.DataFrame) -> pd.DataFrame:
+def outcome_transition_label(outcome_col: str) -> str:
+    return "Attended before payment → later admitted" if outcome_col == "is_final_admitted" else "Attended before payment → later paid"
+
+
+def style_matrix_display(matrix: pd.DataFrame, outcome_col: str) -> pd.DataFrame:
     if matrix.empty:
         return matrix
     show = matrix.copy()
     show["Reach"] = show["reach"].map(lambda x: format_pct(x))
-    show["Attendee conversion"] = show["attendee_conversion"].map(format_pct)
-    show["Eligible non-attendee"] = show["control_conversion"].map(format_pct)
+    show["Pre-payment attendee conversion"] = show["attendee_conversion"].map(format_pct)
+    show["Eligible non-attendee conversion"] = show["control_conversion"].map(format_pct)
     show["Observed payment gap"] = show["observed_payment_gap"].map(pp)
     show["Deadline-adjusted lift"] = show["deadline_adjusted_lift"].map(pp)
     show["Avg engagement lift"] = show["avg_engagement_lift"].map(lambda x: "—" if pd.isna(x) else f"{x:+.2f}")
@@ -1783,25 +1993,26 @@ def style_matrix_display(matrix: pd.DataFrame) -> pd.DataFrame:
     show["Follow-on engagement risk"] = [
         f"{l:.1f}–{h:.1f}" for l, h in zip(show["engagement_risk_low"], show["engagement_risk_high"])
     ]
+    outcome_label = outcome_transition_label(outcome_col)
     cols = [
-        "label", "attendees", "admitted_attendees", "Reach", "Attendee conversion",
-        "Eligible non-attendee", "Observed payment gap", "Deadline-adjusted lift",
+        "label", "attendees", "admitted_attendees", "Reach", "Pre-payment attendee conversion",
+        "Eligible non-attendee conversion", "Observed payment gap", "Deadline-adjusted lift",
         "Avg engagement lift", "Catalyst", "Deadline confounded", "Replacement",
         "Admissions risk", "Follow-on engagement risk", "recommendation",
     ]
     out = show[cols].rename(columns={
         "label": "Activity",
-        "attendees": "Attendees",
-        "admitted_attendees": "Admitted attendees",
+        "attendees": "Pre-payment attendees",
+        "admitted_attendees": outcome_label,
         "recommendation": "Recommendation",
     })
     return out
 
 
-def render_impact_matrix(matrix: pd.DataFrame):
+def render_impact_matrix(matrix: pd.DataFrame, outcome_col: str):
     st.subheader("Activity Impact Matrix")
-    st.caption("Top-level activity types plus Online Event speaker/category groups.")
-    st.dataframe(style_matrix_display(matrix), use_container_width=True, hide_index=True, height=440)
+    st.caption("All attendee counts are strictly pre-payment. Online Event categories use the same AMA grouping as the previous Tetr dashboard.")
+    st.dataframe(style_matrix_display(matrix, outcome_col), use_container_width=True, hide_index=True, height=460)
 
     plot = matrix.copy()
     plot = plot[(plot["attendees"] > 0) & plot["deadline_adjusted_lift"].notna() & plot["avg_engagement_lift"].notna()]
@@ -1820,7 +2031,7 @@ def render_impact_matrix(matrix: pd.DataFrame):
                 "avg_engagement_lift": ":.2f",
                 "deadline_adjusted_lift": ":.1f",
             },
-            title="Payment impact vs engagement impact",
+            title="Payment impact vs pre-payment engagement impact",
         )
         fig.add_hline(y=0, line_dash="dash", line_color="#999")
         fig.add_vline(x=0, line_dash="dash", line_color="#999")
@@ -1828,29 +2039,34 @@ def render_impact_matrix(matrix: pd.DataFrame):
 
 
 def target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> TargetSpec:
+    pre = filter_valid_prepayment_events(attendance)
+    pre = pre[pre["program"].eq(program)].copy() if not pre.empty else pre
+
     activity_type = st.selectbox("Remove / analyse activity type", CORE_TYPES, key=f"{key_prefix}_type")
     if activity_type == "Online Event":
         mode_label = st.radio(
             "Online Event level",
-            ["All Online Events", "Speaker / Category", "Individual Event"],
+            ["All Online Events", "AMA Category", "Individual Event"],
             horizontal=True,
             key=f"{key_prefix}_mode",
         )
-        if mode_label == "Speaker / Category":
-            opts = sorted(
-                x for x in attendance.loc[
-                    (attendance["program"].eq(program)) & attendance["event_category"].eq("Online Event"), "online_group"
+        if mode_label == "AMA Category":
+            present = set(
+                x for x in pre.loc[
+                    pre["event_category"].eq("Online Event"), "online_group"
                 ].dropna().astype(str).unique() if x
-            )
-            value = st.selectbox("Speaker / category", opts or ["Other Online Event"], key=f"{key_prefix}_group")
+            ) if pre is not None and not pre.empty else set()
+            opts = [g for g in AMA_GROUP_ORDER if g in present]
+            opts += sorted(x for x in present if x not in set(AMA_GROUP_ORDER))
+            value = st.selectbox("AMA category", opts or ["Other Online Event"], key=f"{key_prefix}_group")
             return TargetSpec("Online Event", "online_group", value)
         if mode_label == "Individual Event":
             opts = sorted(
-                x for x in attendance.loc[
-                    (attendance["program"].eq(program)) & attendance["event_category"].eq("Online Event"), "event_name"
+                x for x in pre.loc[
+                    pre["event_category"].eq("Online Event"), "event_name"
                 ].dropna().astype(str).unique() if x
-            )
-            value = st.selectbox("Online event", opts or ["No events found"], key=f"{key_prefix}_event")
+            ) if pre is not None and not pre.empty else []
+            value = st.selectbox("Online event", opts or ["No pre-payment events found"], key=f"{key_prefix}_event")
             return TargetSpec("Online Event", "event_name", value)
         return TargetSpec("Online Event")
 
@@ -1865,11 +2081,11 @@ def target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> 
     )
     if level == "Individual Event":
         opts = sorted(
-            x for x in attendance.loc[
-                (attendance["program"].eq(program)) & attendance["event_category"].eq(activity_type), "event_name"
+            x for x in pre.loc[
+                pre["event_category"].eq(activity_type), "event_name"
             ].dropna().astype(str).unique() if x
-        )
-        value = st.selectbox("Event", opts or ["No events found"], key=f"{key_prefix}_event")
+        ) if pre is not None and not pre.empty else []
+        value = st.selectbox("Event", opts or ["No pre-payment events found"], key=f"{key_prefix}_event")
         return TargetSpec(activity_type, "event_name", value)
     return TargetSpec(activity_type)
 
@@ -1883,8 +2099,8 @@ def render_removal_simulator(
     outcome_col: str,
     settings: Dict,
 ):
-    st.subheader("Removal Simulator")
-    st.caption("Select one activity. The app estimates which admissions and engagement behaviours are most exposed if it disappears.")
+    st.subheader("What if we remove an activity?")
+    st.caption("Choose an activity type, an AMA category, or one specific event. Every attendance used below is before payment only.")
 
     spec = target_selector(attendance, program, key_prefix=program.lower())
     metrics, features, eligible_idx = evaluate_target(
@@ -1902,7 +2118,7 @@ def render_removal_simulator(
     projected_conversion = pct(projected, offered_n)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Current admitted", f"{total_admitted:,}")
-    c2.metric("Admitted who attended", f"{metrics['admitted_attendees']:,}")
+    c2.metric(outcome_transition_label(outcome_col), f"{metrics['admitted_attendees']:,}")
     c3.metric("Estimated admissions at risk", f"{metrics['risk_low']:.1f}–{metrics['risk_high']:.1f}", f"central {metrics['risk_mid']:.1f}")
     c4.metric("Central simulated admitted", f"{projected:.1f}", f"-{central:.1f}")
     c5.metric("Central simulated conversion", f"{projected_conversion:.1f}%")
@@ -1946,7 +2162,7 @@ def render_removal_simulator(
         ("No later pre-payment core engagement", int(features["post_event_disengaged"].sum())),
     ]
     reasons = pd.DataFrame(reason_rows, columns=["Signal / possible explanation", "Students"])
-    reasons["Share of attendees"] = reasons["Students"].map(lambda n: f"{pct(n, len(features)):.1f}%")
+    reasons["Share of pre-payment attendees"] = reasons["Students"].map(lambda n: f"{pct(n, len(features)):.1f}%")
     with st.expander("Why this activity looks impactful / confounded", expanded=True):
         st.dataframe(reasons, use_container_width=True, hide_index=True)
 
@@ -1959,13 +2175,14 @@ def render_removal_simulator(
         st.plotly_chart(nice_layout(fig, 340), use_container_width=True)
 
     # Payment timing.
+    timing_value_col = "Pre-payment attendees later admitted" if outcome_col == "is_final_admitted" else "Pre-payment attendees later paid"
     timing = pd.DataFrame({
         "Window": ["Same / ≤3 days", "≤7 days", "≤14 days"],
-        "Admitted attendees": [metrics["pay_3d"], metrics["pay_7d"], metrics["pay_14d"]],
+        timing_value_col: [metrics["pay_3d"], metrics["pay_7d"], metrics["pay_14d"]],
     })
     c1, c2 = st.columns(2)
     with c1:
-        fig = px.bar(timing, x="Window", y="Admitted attendees", text="Admitted attendees", title="Payment after selected activity")
+        fig = px.bar(timing, x="Window", y=timing_value_col, text=timing_value_col, title="Payment after selected activity")
         fig.update_traces(marker_color=GREEN_2)
         st.plotly_chart(nice_layout(fig, 350), use_container_width=True)
     with c2:
@@ -1988,8 +2205,14 @@ def render_removal_simulator(
         "deadline_confounded", "replacement_signal", "evidence_band", "Risk reason",
     ]
     display_cols = [c for c in display_cols if c in show.columns]
+    # Sort before selecting display columns. evidence_score is intentionally
+    # hidden from the table but is used for ordering.
+    sort_cols = [c for c in ["evidence_score", "student_name"] if c in show.columns]
+    if sort_cols:
+        ascending = [False if c == "evidence_score" else True for c in sort_cols]
+        show = show.sort_values(sort_cols, ascending=ascending)
     st.dataframe(
-        show[display_cols].sort_values(["evidence_score", "student_name"], ascending=[False, True]),
+        show[display_cols],
         use_container_width=True,
         hide_index=True,
         height=520,
@@ -2037,29 +2260,101 @@ def render_student_journeys(students: pd.DataFrame, attendance: pd.DataFrame, pr
     c3.metric("Payment", pd.to_datetime(sr.get("payment_date"), errors="coerce").strftime("%d-%b-%Y") if pd.notna(pd.to_datetime(sr.get("payment_date"), errors="coerce")) else "—")
     c4.metric("Status", clean_text(sr.get("status", "")) or "Not Paid")
 
-    ev = attendance[attendance["student_id"].eq(sid)].sort_values("event_date").copy()
+    pre = filter_valid_prepayment_events(attendance)
+    ev = pre[pre["student_id"].eq(sid)].sort_values("event_date").copy()
     if ev.empty:
-        st.info("No core activity participation found.")
+        st.info("No pre-payment core activity participation found.")
         return
-    st.dataframe(ev[["event_date", "event_category", "event_name", "source_sheet", "origin"]], use_container_width=True, hide_index=True)
+    st.caption("Pre-payment only: core batch-sheet activity strictly before payment date, plus qualifying TIF participation. Same-date activity/payment is excluded. Tetr-X attendance is excluded.")
+    st.dataframe(ev[["event_date", "event_category", "online_group", "event_name", "source_sheet", "origin"]], use_container_width=True, hide_index=True)
 
 
 def render_methodology(data: Dict, tif_path: Optional[Path]):
-    st.subheader("Methodology & Data Quality")
     st.markdown(
         """
-        **Outcome source:** Master UG/PG provides the offered roster; payment date and final status are resolved from
-        Tetr-X UG/PG first, with Master values as fallback. UG deferrals and PG `Admitted: Deferral` are treated as paid/final admitted; refunds are excluded from the default final-admitted outcome.
+        ### Core definitions
 
-        **Pre-payment window:** Offer Date → Payment Date for students who paid; Offer Date → Deadline for students who did not pay.
+        **Current admitted**  
+        Current students counted as finally admitted in the selected program. By default this includes **Admitted + valid Deferral statuses** and excludes refunded students. For UG, Deferral is counted; for PG, the paid deferral form is `Admitted: Deferral` / `Admitted Deferral`.
 
-        **Core activities:** Online Event, Masterclass, Competition, Hackathon, and TIF only. General/Fun/Poll/Quiz are deliberately excluded from this simulator.
+        **Attended before payment → later admitted**  
+        Students who attended the selected activity **inside their strict pre-payment window** and later became part of the final admitted population. This is an observed journey relationship, not proof that the event caused the admission.
 
-        **Engagement lift:** calculated only from core participation inside each student's valid pre-payment window, so post-payment Tetr-X activity is not credited back to the event.
+        **Estimated admissions at risk**  
+        A low-to-high behavioural risk range estimating how many currently admitted attendees could plausibly be exposed if the selected activity were removed. It is calculated from each admitted attendee's **High / Medium / Low evidence band** using deliberately wide sensitivity weights. It is a decision-support range, not a causal forecast.
 
-        **Eligible non-attendee comparison:** students present in the same source/batch event sheets and active on the event date; Tetr-X-only rows are excluded from the control pool. Deadline-adjusted lift removes event/index dates within the configured deadline-confound window.
+        **Central simulated admitted**  
+        `Current admitted - central admissions-at-risk estimate`. This is the midpoint scenario from the behavioural risk range.
 
-        **Matching:** exact normalized email → unique normalized full name → unique last-8 phone digits.
+        **Central simulated conversion**  
+        `Central simulated admitted / total offered students` for the selected UG or PG cohort.
+
+        **Deadline-adjusted payment lift**  
+        The percentage-point difference between the final-outcome rate of pre-payment attendees and comparable eligible non-attendees **after removing cases where the selected activity occurred within the configured deadline-confound window**. A positive number means attendees converted at a higher rate in the cleaner comparison. `pp` means percentage points.
+
+        **Avg pre-payment engagement lift**  
+        Average change in the number of core activities around the selected activity: `activities after - activities before`, using the configured engagement window and **only the strict pre-payment timeline**. For example, `+0.50` means attendees averaged half an additional core participation after the selected activity versus before it.
+
+        **Catalyst rate**  
+        Share of pre-payment attendees who had **0-1 core activities before** the selected activity and then reached at least the configured number of later core activities within the engagement window. This is intended to capture events that appear to trigger a sharp rise in engagement.
+
+        **Recommendation**  
+        Rule-based interpretation using sample size, deadline-adjusted payment lift, engagement lift, catalyst rate, deadline confounding, overlap and replacement signals. Labels include **Must Continue, Continue, Optimize, Optimize Timing, Replaceable / Consolidate, Review / Remove Candidate, Review,** and **Need More Data**.
+
+        **Paid within 7 days**  
+        Among the selected activity's attendees who are in the chosen final outcome, the number whose payment date was from the event date through the next 7 days. It is a timing signal only; payment shortly after an activity does not automatically mean the activity caused payment.
+
+        **Deadline-confounded**  
+        Share of admitted attendees whose selected activity happened within the configured number of days before their deposit deadline. These cases are down-weighted because the deadline itself may explain the payment timing.
+
+        **Replacement signal**  
+        Share of pre-payment attendees who attended **another core activity within 7 days after** the selected activity. A high replacement signal means the selected activity may overlap with, or be substitutable by, other engagement opportunities.
+
+        **Post-event disengaged**  
+        Share of pre-payment attendees who had **no later core activity inside the configured engagement window** after the selected activity. This does not prove the event caused disengagement; it simply flags that no subsequent pre-payment core participation was observed in that window.
+
+        **Follow-on engagements at risk**  
+        Low-to-high estimate of the **positive later pre-payment engagement instances** that could be exposed if the activity were removed. Only positive engagement lift is considered, and the same High / Medium / Low sensitivity framework is applied.
+
+        **Students with positive engagement lift**  
+        Number of pre-payment attendees for whom later core activity count in the configured window was greater than their earlier core activity count.
+
+        **Reactivation rate**  
+        Share of attendees who were not first-time participants, had **no core touch in the configured inactivity gap before the selected activity**, and then attended at least 2 later core activities inside the engagement window.
+
+        ### Evidence signals used in the simulator
+
+        **First core touch** = the selected activity was the student's first observed pre-payment core participation.  
+        **Last core touch before payment** = no other core participation occurred between the selected activity and payment.  
+        **Already highly engaged** = at least 6 earlier core participations existed before the selected activity.  
+        **Unique / only target category** = the student's observed pre-payment core journey contained only this activity category.  
+        **High evidence** = behavioural evidence score of 5 or more.  
+        **Medium evidence** = score of 3-4.  
+        **Low evidence** = score below 3.  
+        Evidence rises for short event-to-payment timing, engagement lift, catalyst/reactivation behaviour, first/last touch and uniqueness; it is reduced by deadline confounding, already-high engagement and quick replacement by another activity.
+
+        ### Data and scope rules
+
+        **Outcome source**  
+        Master UG/PG is the offered roster. Payment date and final status are resolved from Tetr-X UG/PG first, with Master as fallback. UG Deferral and PG `Admitted: Deferral` are treated as paid/final admitted. Refunds are excluded from the default **Final admitted** outcome.
+
+        **What counts as pre-payment attendance**  
+        This simulator is deliberately strict: **only core activity participation from UG/PG batch sheets from Offer Date up to the day before Payment Date is used for paid students**. For unpaid students the window is Offer Date → Deadline. Because source data is date-level, an event on the same calendar date as payment is **excluded**: the sequence cannot be proven. Payment must occur on a later calendar date than the activity. **Tetr-X activity columns are never counted as pre-payment attendance**; Tetr-X is used for payment date/status only.
+
+        **Core activities**  
+        Online Event, Masterclass, Competition, Hackathon and TIF only. General, General Activity, Fun, Fun Task, Poll and Quiz are hard-excluded everywhere, even if their title contains words such as TIF, AMA, webinar or challenge.
+
+        **Online Event / AMA categories**  
+        Uses the previous dashboard's categories: AMA Welcome Webinar; AMA Pratham; AMA Tarun; AMA Amitoj; AMA Garima; AMA Capstone; AMA Life at Tetr; and Other Online Event. Individual Online Events remain selectable separately.
+
+        **TIF**  
+        The local `Tetr Innovation Fund - Overall Data` file is treated as the participation roster: each matched UG/PG student counts once as TIF. If the file has no participation-date column, the sidebar TIF fallback date is used. TIF only enters a student's pre-payment analysis when that date is within the student's valid pre-payment window.
+
+        **Eligible non-attendee comparison**  
+        Controls come from students present in the batch/source sheets where that event occurred and whose active Offer → Payment/Deadline window covered that date. Tetr-X-only populations are excluded from the control pool.
+
+        **Matching**  
+        Exact normalized email → unique normalized full name → unique last-8 phone digits.
         """
     )
     students = data.get("students", pd.DataFrame())
@@ -2087,22 +2382,40 @@ def render_methodology(data: Dict, tif_path: Optional[Path]):
 # -----------------------------------------------------------------------------
 
 def main():
-    st.title("Tetr Activity Impact Simulator")
-    st.caption("What should we continue, optimize, consolidate or remove — and what could happen to payments and engagement if we do?")
+    spreadsheet_id = get_spreadsheet_id()
+    source_label = "Streamlit Secrets" if spreadsheet_id != HARDCODED_SHEET_ID else "default Tetr master sheet fallback"
+
+    st.markdown(
+        f"""
+        <div class="hero-card">
+            <div style="font-size:30px; font-weight:900; color:#0b3d2e;">Tetr Activity Impact Simulator</div>
+            <div style="margin-top:6px; color:#2e6b57; font-weight:600;">What should we continue, optimize, consolidate or remove — and what could happen to payments and pre-payment engagement if we do?</div>
+            <div style="margin-top:10px;"><span class="live-pill"><span class="heartbeat-dot"></span>LIVE · Google Sheets · {source_label}</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Build: {APP_BUILD_VERSION}")
     render_method_note()
 
-    spreadsheet_id = get_spreadsheet_id()
     tif_path = discover_tif_file()
     default_tif_date = get_default_tif_date()
 
     with st.sidebar:
-        st.markdown("## Impact Simulator")
-        section = st.radio("Section", ["UG Impact", "PG Impact"], index=0)
+        st.markdown("## Navigation")
+        section = st.radio(
+            "Impact section",
+            ["UG Impact", "PG Impact"],
+            index=0,
+            label_visibility="collapsed",
+            key="impact_program_nav",
+        )
         program = "UG" if section.startswith("UG") else "PG"
 
         st.markdown("---")
+        st.caption(f"Build {APP_BUILD_VERSION} · {CONNECTION_BUILD}")
         st.markdown("### Analysis settings")
-        outcome_label = st.radio(
+        outcome_label = st.selectbox(
             "Primary outcome",
             ["Final admitted", "Ever paid incl. refunds"],
             index=0,
@@ -2118,20 +2431,17 @@ def main():
         tif_date = st.date_input("TIF fallback activity date", value=default_tif_date.date())
         st.caption("Used only when the local TIF file has no date column.")
 
-        if st.button("Refresh live data"):
+        if st.button("Refresh live data", use_container_width=True):
             st.cache_data.clear()
             st.cache_resource.clear()
             st.rerun()
 
-    if not spreadsheet_id:
-        st.error("Add `GSHEET_SPREADSHEET_ID` to Streamlit Secrets, using the same setup as your existing dashboard.")
-        st.stop()
     if not get_service_account_dict():
         st.error("Add `[GOOGLE_SERVICE_ACCOUNT]` to Streamlit Secrets, using the same service-account JSON as your existing dashboard.")
         st.stop()
 
     try:
-        with st.spinner("Loading live Google Sheet and building student timelines..."):
+        with st.spinner("Loading live Google Sheet and building strict pre-payment student timelines..."):
             data = build_model(
                 spreadsheet_id,
                 str(tif_path) if tif_path else "",
@@ -2152,6 +2462,8 @@ def main():
             st.success(f"TIF loaded · {data['tif_loaded_name']}")
         else:
             st.warning("No local TIF file found. Commit it beside this .py file or set TIF_FILE in Secrets.")
+        pre_count = len(filter_valid_prepayment_events(attendance)) if attendance is not None else 0
+        st.caption(f"Strict pre-payment core rows loaded: {pre_count:,}")
 
     settings = {
         "engagement_window": engagement_window,
@@ -2168,18 +2480,20 @@ def main():
         engagement_window, deadline_confound_days, catalyst_after_count, reactivation_gap_days,
     )
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Impact Matrix", "Removal Simulator", "Student Journeys", "Methodology",
+    tab1, tab2, tab3 = st.tabs([
+        "Impact Matrix", "What if we remove an activity?", "Student Journeys",
     ])
     with tab1:
-        render_impact_matrix(matrix)
+        render_impact_matrix(matrix, outcome_col)
     with tab2:
         render_removal_simulator(
             students, attendance, occurrences, membership, program, outcome_col, settings
         )
     with tab3:
         render_student_journeys(students, attendance, program)
-    with tab4:
+
+    st.markdown("---")
+    with st.expander("Definitions & methodology", expanded=False):
         render_methodology(data, tif_path)
 
 
