@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import math
 import re
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -125,7 +126,7 @@ ONLINE_EVENT_GROUP_PATTERNS: Dict[str, Sequence[str]] = {
 }
 
 DEFAULT_TIF_DATE = "2026-06-16"
-APP_BUILD_VERSION = "2026-09-04-v11-multi-remove"
+APP_BUILD_VERSION = "2026-09-04-v12-checkbox-tree"
 HARDCODED_SHEET_ID = "1By2Zb8vKQnTIQn72JRgyEuuRgO6ZZARCZ1JNklmf25U"
 CONNECTION_BUILD = "WORKING_V3_FALLBACK_CONNECTION"
 # CONNECTION LOCK: copied unchanged from the v3/v7 build that successfully connected.
@@ -2177,28 +2178,262 @@ def _collapse_multi_specs(specs: Sequence[TargetSpec]) -> List[TargetSpec]:
     return out
 
 
+def _checkbox_state_key(prefix: str, *parts: str) -> str:
+    """Stable, compact Streamlit key for dynamically generated checkbox leaves."""
+    raw = "|".join(clean_text(p) for p in parts)
+    digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:14]
+    return f"{prefix}_{digest}"
+
+
+def _apply_bulk_checkbox(parent_key: str, child_keys: Sequence[str], linked_bulk_keys: Sequence[str] = ()) -> None:
+    """Use a bulk checkbox as a convenience setter; leaf boxes remain authoritative.
+
+    A user can tick a whole activity/category, then untick any individual child to
+    create an exact 'all except X' combination. This callback only copies the
+    parent's current state into its children at the moment the parent is toggled.
+    """
+    value = bool(st.session_state.get(parent_key, False))
+    for key in child_keys:
+        st.session_state[key] = value
+    for key in linked_bulk_keys:
+        st.session_state[key] = value
+
+
+def _compress_checkbox_specs(pre: pd.DataFrame, selected_leaf_specs: Sequence[TargetSpec]) -> List[TargetSpec]:
+    """Compress leaf selections without changing their union.
+
+    The checkbox tree is leaf-driven so every individual event can be independently
+    selected/deselected. For performance and readable labels, a complete set of
+    selected leaves is collapsed back to an existing whole-type or AMA-group spec.
+    """
+    selected_leaf_specs = list(selected_leaf_specs)
+    if not selected_leaf_specs:
+        return []
+
+    out: List[TargetSpec] = []
+
+    # TIF is one roster-level activity in the current source.
+    if any(s.activity_type == "TIF" for s in selected_leaf_specs):
+        out.append(TargetSpec("TIF"))
+
+    for activity_type in [t for t in CORE_TYPES if t != "TIF"]:
+        type_pre = pre[pre["event_category"].eq(activity_type)].copy()
+        all_events = {
+            clean_text(x) for x in type_pre.get("event_name", pd.Series(dtype=str)).dropna().astype(str).unique()
+            if clean_text(x)
+        }
+        selected_events = {
+            clean_text(s.value) for s in selected_leaf_specs
+            if s.activity_type == activity_type and s.mode == "event_name" and clean_text(s.value)
+        }
+        if not selected_events:
+            continue
+
+        # Exact whole-type selection.
+        if all_events and selected_events == all_events:
+            out.append(TargetSpec(activity_type))
+            continue
+
+        remaining = set(selected_events)
+
+        # For Online Events, collapse fully selected established AMA groups while
+        # still preserving any individually deselected event inside another group.
+        if activity_type == "Online Event":
+            present_groups = [
+                g for g in AMA_GROUP_ORDER
+                if g in set(type_pre.get("online_group", pd.Series(dtype=str)).dropna().astype(str))
+            ]
+            other_groups = sorted(
+                g for g in set(type_pre.get("online_group", pd.Series(dtype=str)).dropna().astype(str))
+                if g and g not in set(present_groups)
+            )
+            for group in present_groups + other_groups:
+                group_events = {
+                    clean_text(x) for x in type_pre.loc[
+                        type_pre["online_group"].astype(str).eq(group), "event_name"
+                    ].dropna().astype(str).unique() if clean_text(x)
+                }
+                if group_events and group_events.issubset(remaining):
+                    out.append(TargetSpec("Online Event", "online_group", group))
+                    remaining -= group_events
+
+        for event_name in sorted(remaining):
+            out.append(TargetSpec(activity_type, "event_name", event_name))
+
+    return _collapse_multi_specs(out)
+
+
+def _render_leaf_checkbox_grid(items: Sequence[Tuple[str, str]], columns: int = 2) -> None:
+    """Render (label, key) checkbox leaves in a compact grid."""
+    items = list(items)
+    if not items:
+        st.caption("No pre-payment activities found in this group.")
+        return
+    cols = st.columns(max(1, columns))
+    for i, (label, key) in enumerate(items):
+        with cols[i % len(cols)]:
+            st.checkbox(label, key=key, help=label)
+
+
 def multi_target_selector(attendance: pd.DataFrame, program: str, key_prefix: str) -> Optional[TargetSpec]:
-    options = _multi_target_options(attendance, program)
-    labels = list(options.keys())
-    selected_labels = st.multiselect(
-        "Select activities to remove together",
-        labels,
-        default=[],
-        placeholder="Choose two or more activities / categories / events",
-        key=f"{key_prefix}_multi_targets",
-        help="The simulator treats the selected items as one combined removal scenario. Overlapping selections are automatically deduplicated.",
-    )
-    if not selected_labels:
-        st.info("Select activities above to see the combined removal scenario.")
+    """Hierarchical checkbox selector for arbitrary multi-removal combinations.
+
+    There is intentionally no dropdown/multiselect here. Bulk type/group checkboxes
+    are convenience controls only; the individual activity checkboxes are the source
+    of truth. That means a user can select a parent and then deselect any children,
+    supporting every practical permutation/combination of activities.
+    """
+    pre = filter_valid_prepayment_events(attendance)
+    pre = pre[pre["program"].eq(program)].copy() if pre is not None and not pre.empty else pre
+    if pre is None or pre.empty:
+        st.info("No pre-payment core activities found for this program.")
         return None
-    specs = _collapse_multi_specs([options[label] for label in selected_labels])
+
+    st.markdown("#### Select activities to remove together")
+    st.caption(
+        "Tick any activity combination. **Bulk checkboxes only select/clear their children**; "
+        "after using one, you can untick any individual activity to create an exact combination."
+    )
+
+    # Build every atomic leaf first. The simulator uses these leaf states as truth.
+    leaf_meta: List[Dict[str, str]] = []
+    for activity_type in [t for t in CORE_TYPES if t != "TIF"]:
+        subset = pre[pre["event_category"].eq(activity_type)].copy()
+        cols_needed = [c for c in ["event_name", "online_group"] if c in subset.columns]
+        subset = subset[cols_needed].drop_duplicates() if cols_needed else pd.DataFrame()
+        if subset.empty:
+            continue
+        for _, row in subset.sort_values("event_name").iterrows():
+            event_name = clean_text(row.get("event_name", ""))
+            if not event_name:
+                continue
+            online_group = clean_text(row.get("online_group", "")) if activity_type == "Online Event" else ""
+            key = _checkbox_state_key(key_prefix, "multi_leaf", activity_type, online_group, event_name)
+            leaf_meta.append({
+                "activity_type": activity_type,
+                "online_group": online_group,
+                "event_name": event_name,
+                "key": key,
+            })
+
+    tif_present = bool(pre["event_category"].eq("TIF").any())
+    tif_key = _checkbox_state_key(key_prefix, "multi_leaf", "TIF", "Tetr Innovation Fund")
+    if tif_present:
+        leaf_meta.append({
+            "activity_type": "TIF", "online_group": "", "event_name": "Tetr Innovation Fund", "key": tif_key
+        })
+
+    # Pre-compute bulk keys so global/type bulk toggles can keep the visible controls aligned.
+    type_bulk_keys: Dict[str, str] = {
+        t: _checkbox_state_key(key_prefix, "bulk_type", t) for t in CORE_TYPES
+    }
+    group_bulk_keys: Dict[str, str] = {}
+    online_groups = sorted({m["online_group"] for m in leaf_meta if m["activity_type"] == "Online Event" and m["online_group"]})
+    ordered_groups = [g for g in AMA_GROUP_ORDER if g in online_groups]
+    ordered_groups += [g for g in online_groups if g not in set(ordered_groups)]
+    for group in ordered_groups:
+        group_bulk_keys[group] = _checkbox_state_key(key_prefix, "bulk_group", group)
+
+    all_leaf_keys = [m["key"] for m in leaf_meta]
+    all_linked_bulk_keys = list(type_bulk_keys.values()) + list(group_bulk_keys.values())
+    global_bulk_key = _checkbox_state_key(key_prefix, "bulk_all_core")
+    st.checkbox(
+        "Select / clear ALL core activities",
+        key=global_bulk_key,
+        on_change=_apply_bulk_checkbox,
+        args=(global_bulk_key, all_leaf_keys, all_linked_bulk_keys),
+        help="Convenience toggle. You can still untick any individual activity afterwards.",
+    )
+
+    st.markdown("---")
+
+    # ONLINE EVENTS: type -> AMA category -> individual online event.
+    online_items = [m for m in leaf_meta if m["activity_type"] == "Online Event"]
+    if online_items:
+        with st.expander(f"Online Events · {len(online_items)} individual activities", expanded=True):
+            online_leaf_keys = [m["key"] for m in online_items]
+            online_group_keys = [group_bulk_keys[g] for g in ordered_groups]
+            st.checkbox(
+                "Select / clear all Online Events",
+                key=type_bulk_keys["Online Event"],
+                on_change=_apply_bulk_checkbox,
+                args=(type_bulk_keys["Online Event"], online_leaf_keys, online_group_keys),
+            )
+            st.caption("AMA/category checkboxes are bulk selectors. Individual event boxes below are the final selection.")
+
+            grouped = {}
+            for item in online_items:
+                grouped.setdefault(item["online_group"] or "Other Online Event", []).append(item)
+
+            group_order = [g for g in AMA_GROUP_ORDER if g in grouped]
+            group_order += sorted(g for g in grouped if g not in set(group_order))
+            for group in group_order:
+                items = sorted(grouped[group], key=lambda x: x["event_name"].lower())
+                group_key = group_bulk_keys.setdefault(group, _checkbox_state_key(key_prefix, "bulk_group", group))
+                st.markdown(f"**{group}**")
+                st.checkbox(
+                    f"Select / clear all in {group}",
+                    key=group_key,
+                    on_change=_apply_bulk_checkbox,
+                    args=(group_key, [m["key"] for m in items], ()),
+                )
+                _render_leaf_checkbox_grid([(m["event_name"], m["key"]) for m in items], columns=2)
+                selected_in_group = sum(bool(st.session_state.get(m["key"], False)) for m in items)
+                st.caption(f"Selected {selected_in_group} of {len(items)} in {group}")
+                st.markdown("")
+
+    # MASTERCLASS / COMPETITION / HACKATHON: type -> individual activity.
+    display_names = {
+        "Masterclass": "Masterclasses",
+        "Competition": "Competitions",
+        "Hackathon": "Hackathons",
+    }
+    for activity_type in ["Masterclass", "Competition", "Hackathon"]:
+        items = [m for m in leaf_meta if m["activity_type"] == activity_type]
+        if not items:
+            continue
+        with st.expander(f"{display_names[activity_type]} · {len(items)} individual activities", expanded=False):
+            leaf_keys = [m["key"] for m in items]
+            st.checkbox(
+                f"Select / clear all {display_names[activity_type]}",
+                key=type_bulk_keys[activity_type],
+                on_change=_apply_bulk_checkbox,
+                args=(type_bulk_keys[activity_type], leaf_keys, ()),
+            )
+            _render_leaf_checkbox_grid(
+                [(m["event_name"], m["key"]) for m in sorted(items, key=lambda x: x["event_name"].lower())],
+                columns=2,
+            )
+            selected_n = sum(bool(st.session_state.get(m["key"], False)) for m in items)
+            st.caption(f"Selected {selected_n} of {len(items)} {display_names[activity_type].lower()}")
+
+    # TIF is one leaf in the current manually uploaded roster.
+    if tif_present:
+        with st.expander("TIF", expanded=False):
+            st.checkbox("Remove TIF participation", key=tif_key)
+
+    selected_leaf_specs: List[TargetSpec] = []
+    for item in leaf_meta:
+        if not bool(st.session_state.get(item["key"], False)):
+            continue
+        if item["activity_type"] == "TIF":
+            selected_leaf_specs.append(TargetSpec("TIF"))
+        else:
+            selected_leaf_specs.append(TargetSpec(item["activity_type"], "event_name", item["event_name"]))
+
+    selected_leaf_count = len(selected_leaf_specs)
+    if selected_leaf_count == 0:
+        st.info("Tick one or more activity checkboxes to see the combined removal scenario.")
+        return None
+
+    st.success(f"{selected_leaf_count} individual activit{'y' if selected_leaf_count == 1 else 'ies'} selected for removal.")
+    specs = _compress_checkbox_specs(pre, selected_leaf_specs)
     if not specs:
         return None
     if len(specs) == 1:
         return specs[0]
     components = tuple((s.activity_type, s.mode, s.value) for s in specs)
     return TargetSpec("Multiple Activities", "multi", components=components)
-
 
 def render_removal_simulator(
     students: pd.DataFrame,
